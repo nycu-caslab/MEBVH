@@ -1539,6 +1539,7 @@ Primitive BasicScene::CreateAggregate(
                                   movingInstancePrimitives.end());
 
         if (instancePrimitives.size() > 1) {
+            // create prebuild bvh here for each instance
             Primitive bvh = new BVHAggregate(std::move(instancePrimitives));
             instancePrimitives.clear();
             instancePrimitives.push_back(bvh);
@@ -1579,6 +1580,8 @@ Primitive BasicScene::CreateAggregate(
     instances.clear();
     instances.shrink_to_fit();
     LOG_VERBOSE("Finished instances");
+
+    LOG_CONCISE("primitives: %d", primitives.size());
 
     // Accelerator
     Primitive aggregate = nullptr;

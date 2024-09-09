@@ -13,7 +13,7 @@
 namespace pbrt {
 
 // LogLevel Definition
-enum class LogLevel { Verbose, Error, Fatal, Invalid };
+enum class LogLevel { Verbose, Concise, Error, Fatal, Invalid };
 
 std::string ToString(LogLevel level);
 LogLevel LogLevelFromString(const std::string &s);
@@ -43,6 +43,11 @@ extern FILE *logFile;
 // Logging Function Declarations
 PBRT_CPU_GPU
 void Log(LogLevel level, const char *file, int line, const char *s);
+
+PBRT_CPU_GPU
+void LogRed(LogLevel level, const char *file, int line, const char *s);
+
+
 
 PBRT_CPU_GPU [[noreturn]] void LogFatal(LogLevel level, const char *file, int line,
                                         const char *s);
@@ -79,6 +84,14 @@ extern __constant__ LogLevel LOGGING_LogLevelGPU;
 #define LOG_VERBOSE(...)                             \
     (pbrt::LogLevel::Verbose >= logging::logLevel && \
      (pbrt::Log(LogLevel::Verbose, __FILE__, __LINE__, __VA_ARGS__), true))
+
+#define LOG_RED(...)                             \
+    (pbrt::LogLevel::Verbose >= logging::logLevel && \
+     (pbrt::LogRed(LogLevel::Verbose, __FILE__, __LINE__, __VA_ARGS__), true))
+
+#define LOG_CONCISE(...)                             \
+    (pbrt::LogLevel::Concise >= logging::logLevel && \
+     (pbrt::Log(LogLevel::Concise, __FILE__, __LINE__, __VA_ARGS__), true))
 
 #define LOG_ERROR(...)                                   \
     (pbrt::LogLevel::Error >= pbrt::logging::logLevel && \

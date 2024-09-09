@@ -307,6 +307,8 @@ std::vector<GPULogItem> ReadGPULogs() {
 LogLevel LogLevelFromString(const std::string &s) {
     if (s == "verbose")
         return LogLevel::Verbose;
+    else if(s == "concise")
+        return LogLevel::Concise;
     else if (s == "error")
         return LogLevel::Error;
     else if (s == "fatal")
@@ -318,6 +320,8 @@ std::string ToString(LogLevel level) {
     switch (level) {
     case LogLevel::Verbose:
         return "VERBOSE";
+    case LogLevel::Concise:
+        return "Concise";
     case LogLevel::Error:
         return "ERROR";
     case LogLevel::Fatal:
@@ -385,6 +389,69 @@ void Log(LogLevel level, const char *file, int line, const char *s) {
         fflush(logging::logFile);
     } else
         fprintf(stderr, "[ " LOG_BASE_FMT " %s:%d ] %s%s\n", LOG_BASE_ARGS,
+                shortfile.c_str(), line, levelString.c_str(), s);
+#endif
+}
+
+
+void LogRed(LogLevel level, const char *file, int line, const char *s) {
+#ifdef PBRT_IS_GPU_CODE
+    auto strlen = [](const char *ptr) {
+        int len = 0;
+        while (*ptr) {
+            ++len;
+            ++ptr;
+        }
+        return len;
+    };
+
+    // Grab a slot
+    int offset = atomicAdd(&nRawLogItems, 1);
+    GPULogItem &item = rawLogItems[offset % MAX_LOG_ITEMS];
+    item.level = level;
+
+    // If the file name is too long to fit in GPULogItem.file, then copy
+    // the trailing bits.
+    int len = strlen(file);
+    if (len + 1 > sizeof(item.file)) {
+        int start = len - sizeof(item.file) + 1;
+        if (start < 0)
+            start = 0;
+        for (int i = start; i < len; ++i)
+            item.file[i - start] = file[i];
+        item.file[len - start] = '\0';
+
+        // Now clobber the start with "..." to show it was truncated
+        item.file[0] = item.file[1] = item.file[2] = '.';
+    } else {
+        for (int i = 0; i < len; ++i)
+            item.file[i] = file[i];
+        item.file[len] = '\0';
+    }
+
+    item.line = line;
+
+    // Copy as much of the message as we can...
+    int i;
+    for (i = 0; i < sizeof(item.message) - 1 && *s; ++i, ++s)
+        item.message[i] = *s;
+    item.message[i] = '\0';
+#else
+    int len = strlen(s);
+    if (len == 0)
+        return;
+    std::string levelString = (level == LogLevel::Verbose) ? "" : (ToString(level) + " ");
+
+    // cut off everything up to pbrt/
+    const char *fileStart = strstr(file, "pbrt/");
+    std::string shortfile(fileStart ? (fileStart + 5) : file);
+
+    if (logging::logFile) {
+        fprintf(logging::logFile, "\x1b[31m[ " LOG_BASE_FMT " %s:%d ] %s%s\x1b[0m\n", LOG_BASE_ARGS,
+                shortfile.c_str(), line, levelString.c_str(), s);
+        fflush(logging::logFile);
+    } else
+        fprintf(stderr, "\x1b[31m[ " LOG_BASE_FMT " %s:%d ] %s%s\x1b[0m\n", LOG_BASE_ARGS,
                 shortfile.c_str(), line, levelString.c_str(), s);
 #endif
 }

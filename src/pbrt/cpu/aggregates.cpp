@@ -1163,6 +1163,7 @@ KdTreeAggregate *KdTreeAggregate::Create(std::vector<Primitive> prims,
 Primitive CreateAccelerator(const std::string &name, std::vector<Primitive> prims,
                             const ParameterDictionary &parameters) {
     Primitive accel = nullptr;
+    LOG_VERBOSE("Create Accelerator called with name %s", name);
     if (name == "bvh")
         accel = BVHAggregate::Create(std::move(prims), parameters);
     else if (name == "kdtree")
