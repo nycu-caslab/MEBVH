@@ -94,6 +94,8 @@ BasicSceneBuilder::BasicSceneBuilder(BasicScene *scene)
     filter.name = SceneEntity::internedStrings.Lookup("gaussian");
     integrator.name = SceneEntity::internedStrings.Lookup("volpath");
     accelerator.name = SceneEntity::internedStrings.Lookup("bvh");
+    if(Options->VQBVH)
+        accelerator.name = SceneEntity::internedStrings.Lookup("vqbvh");
 
     film.name = SceneEntity::internedStrings.Lookup("rgb");
     film.parameters = ParameterDictionary({}, RGBColorSpace::sRGB);
@@ -1036,7 +1038,6 @@ void BasicScene::AddAnimatedShape(AnimatedShapeSceneEntity shape) {
 void BasicScene::AddInstanceDefinition(InstanceDefinitionSceneEntity instance) {
     InstanceDefinitionSceneEntity *def =
         new InstanceDefinitionSceneEntity(std::move(instance));
-
     std::lock_guard<std::mutex> lock(instanceDefinitionMutex);
     instanceDefinitions[def->name] = def;
 }
@@ -1355,6 +1356,7 @@ Primitive BasicScene::CreateAggregate(
     const std::map<std::string, Medium> &media,
     const std::map<std::string, pbrt::Material> &namedMaterials,
     const std::vector<pbrt::Material> &materials) {
+    
     Allocator alloc;
     auto findMedium = [&media](const std::string &s, const FileLoc *loc) -> Medium {
         if (s.empty())
@@ -1524,9 +1526,10 @@ Primitive BasicScene::CreateAggregate(
     std::mutex instanceDefinitionsMutex;
     std::vector<std::map<InternedString, InstanceDefinitionSceneEntity *>::iterator>
         instanceDefinitionIterators;
-    for (auto iter = this->instanceDefinitions.begin();
-         iter != this->instanceDefinitions.end(); ++iter)
+
+    for (auto iter = this->instanceDefinitions.begin(); iter != this->instanceDefinitions.end(); ++iter)
         instanceDefinitionIterators.push_back(iter);
+
     ParallelFor(0, instanceDefinitionIterators.size(), [&](int64_t i) {
         auto &inst = *instanceDefinitionIterators[i];
 
@@ -1554,8 +1557,11 @@ Primitive BasicScene::CreateAggregate(
         delete inst.second;
         inst.second = nullptr;
     });
-
     this->instanceDefinitions.clear();
+
+    // At here, this->instanceDefinitions is empty
+    // instanceDefinitions is filled with key InternedString and value Primitive (prebuild BVHAggregate)
+    // next to push instances to primitives;
 
     // Instances
     for (const auto &inst : instances) {
@@ -1581,7 +1587,33 @@ Primitive BasicScene::CreateAggregate(
     instances.shrink_to_fit();
     LOG_VERBOSE("Finished instances");
 
-    LOG_CONCISE("primitives: %d", primitives.size());
+    // test
+    size_t SPs = 0;
+    size_t GPs = 0;
+    size_t TPs = 0;
+    size_t APs = 0;
+    size_t BAs = 0;
+    size_t KAs = 0;
+    size_t VAs = 0;
+
+    for(Primitive &prim: primitives){
+        SPs += (nullptr != prim.CastOrNullptr<SimplePrimitive>());
+        GPs += (nullptr != prim.CastOrNullptr<GeometricPrimitive>());
+        TPs += (nullptr != prim.CastOrNullptr<TransformedPrimitive>());
+        APs += (nullptr != prim.CastOrNullptr<AnimatedPrimitive>());
+        BAs += (nullptr != prim.CastOrNullptr<BVHAggregate>());
+        KAs += (nullptr != prim.CastOrNullptr<KdTreeAggregate>());
+        VAs += (nullptr != prim.CastOrNullptr<VQBVHAggregate>());
+    }
+    LOG_CONCISE("SimplePrimitive      : %lu", SPs);
+    LOG_CONCISE("GeometricPrimitive   : %lu", GPs);
+    LOG_CONCISE("TransformedPrimitive : %lu", TPs);
+    LOG_CONCISE("AnimatedPrimitive    : %lu", APs);
+    LOG_CONCISE("BVHAggregate         : %lu", BAs);
+    LOG_CONCISE("KdTreeAggregate      : %lu", KAs);
+    LOG_CONCISE("VQBVHAggregate       : %lu", VAs);
+
+
 
     // Accelerator
     Primitive aggregate = nullptr;

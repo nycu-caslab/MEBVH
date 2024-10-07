@@ -213,9 +213,6 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
-    // Print the PBRTOption values
-
-    printf("Options: %s\n", options.ToString().c_str());
 
     // Print welcome banner
     if (!options.quiet && !format && !toPly && !options.upgrade) {

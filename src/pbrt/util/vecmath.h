@@ -1371,6 +1371,10 @@ class Bounds3 {
     PBRT_CPU_GPU
     bool IntersectP(Point3f o, Vector3f d, Float tMax, Vector3f invDir,
                     const int dirIsNeg[3]) const;
+    
+    PBRT_CPU_GPU
+    bool IntersectP(Point3f o, Vector3f d, Float tMax, Vector3f invDir,
+                    const int dirIsNeg[3], Float &t0, Float &t1) const;
 
     std::string ToString() const { return StringPrintf("[ %s - %s ]", pMin, pMax); }
 
@@ -1604,6 +1608,42 @@ PBRT_CPU_GPU inline bool Bounds3<T>::IntersectP(Point3f o, Vector3f d, Float ray
     if (tzMax < tMax)
         tMax = tzMax;
 
+    return (tMin < raytMax) && (tMax > 0);
+}
+
+template <typename T>
+PBRT_CPU_GPU inline bool Bounds3<T>::IntersectP(Point3f o, Vector3f d, Float raytMax,
+                                                Vector3f invDir,
+                                                const int dirIsNeg[3], Float &tMin, Float &tMax) const {
+    const Bounds3f &bounds = *this;
+    // Check for ray intersection against $x$ and $y$ slabs
+    tMin = (bounds[dirIsNeg[0]].x - o.x) * invDir.x;
+    tMax = (bounds[1 - dirIsNeg[0]].x - o.x) * invDir.x;
+    Float tyMin = (bounds[dirIsNeg[1]].y - o.y) * invDir.y;
+    Float tyMax = (bounds[1 - dirIsNeg[1]].y - o.y) * invDir.y;
+    // Update _tMax_ and _tyMax_ to ensure robust bounds intersection
+    tMax *= 1 + 2 * gamma(3);
+    tyMax *= 1 + 2 * gamma(3);
+
+    if (tMin > tyMax || tyMin > tMax)
+        return false;
+    if (tyMin > tMin)
+        tMin = tyMin;
+    if (tyMax < tMax)
+        tMax = tyMax;
+
+    // Check for ray intersection against $z$ slab
+    Float tzMin = (bounds[dirIsNeg[2]].z - o.z) * invDir.z;
+    Float tzMax = (bounds[1 - dirIsNeg[2]].z - o.z) * invDir.z;
+    // Update _tzMax_ to ensure robust bounds intersection
+    tzMax *= 1 + 2 * gamma(3);
+
+    if (tMin > tzMax || tzMin > tMax)
+        return false;
+    if (tzMin > tMin)
+        tMin = tzMin;
+    if (tzMax < tMax)
+        tMax = tzMax;
     return (tMin < raytMax) && (tMax > 0);
 }
 

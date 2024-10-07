@@ -69,6 +69,64 @@ class BVHAggregate {
     LinearBVHNode *nodes = nullptr;
 };
 
+struct LinearVQBVHNode;
+
+class VQBVHAggregate {
+  public:
+    enum class SplitMethod { SAH, HLBVH, Middle, EqualCounts };
+
+    VQBVHAggregate(std::vector<Primitive> p, int maxPrimsInNode = 1,
+                 SplitMethod splitMethod = SplitMethod::SAH);
+
+    static VQBVHAggregate *Create(std::vector<Primitive> prims,
+                                const ParameterDictionary &parameters);
+
+    Bounds3f Bounds() const;
+    pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax) const;
+    bool IntersectP(const Ray &ray, Float tMax) const;
+
+  private:
+    // VQBVHAggregate Private Methods
+    BVHBuildNode *buildRecursive(ThreadLocal<Allocator> &threadAllocators,
+                                 pstd::span<BVHPrimitive> bvhPrimitives,
+                                 std::atomic<int> *totalNodes,
+                                 std::atomic<int> *orderedPrimsOffset,
+                                 std::vector<Primitive> &orderedPrims);
+    // BVHBuildNode *buildHLBVH(Allocator alloc,
+    //                          const std::vector<BVHPrimitive> &primitiveInfo,
+    //                          std::atomic<int> *totalNodes,
+    //                          std::vector<Primitive> &orderedPrims);
+    // BVHBuildNode *emitLBVH(BVHBuildNode *&buildNodes,
+    //                        const std::vector<BVHPrimitive> &primitiveInfo,
+    //                        MortonPrimitive *mortonPrims, int nPrimitives, int *totalNodes,
+    //                        std::vector<Primitive> &orderedPrims,
+    //                        std::atomic<int> *orderedPrimsOffset, int bitIndex);
+    // BVHBuildNode *buildUpperSAH(Allocator alloc,
+    //                             std::vector<BVHBuildNode *> &treeletRoots, int start,
+    //                             int end, std::atomic<int> *totalNodes) const;
+    // VQBVH parameters
+    static constexpr uint16_t seg_interval = 16;
+    static constexpr Float inv_seg_interval = 1.0 / seg_interval;
+    static constexpr uint8_t max_depth = 4;
+
+    int flattenVQBVH(BVHBuildNode *node, int *offset, Bounds3f parent_box);
+    void hierarchicalMask(const Bounds3f &target_bound, LinearVQBVHNode* target, int cur_offset, int depth);
+    inline Bounds3f computeBounds(const LinearVQBVHNode &node, const Bounds3f &parent_box) const;
+    inline bool maskTest(const Bounds3f &bounds, const Ray& ray, const LinearVQBVHNode &node, const Float& t0, const Float& t1) const;
+
+    static std::unordered_map<uint16_t, uint64_t> raymask_lut;
+    static std::unordered_map<uint16_t, uint64_t> filling_lut;
+    // VQBVHAggregate Private Members
+    int maxPrimsInNode;
+    std::vector<Primitive> primitives;
+    SplitMethod splitMethod;
+    
+    // VQBVH structure
+    Bounds3f bound;
+    Bounds3f *quantizedBounds = nullptr;
+    LinearVQBVHNode *nodes = nullptr;
+};
+
 struct KdTreeNode;
 struct BoundEdge;
 
