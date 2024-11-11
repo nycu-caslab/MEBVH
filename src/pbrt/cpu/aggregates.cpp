@@ -806,8 +806,8 @@ VQBVHAggregate::VQBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode,
     bvhPrimitives.shrink_to_fit();
     LOG_CONCISE("BVH created with %d nodes for %d primitives (%.2f MB)",
                 totalNodes.load(), (int)primitives.size(),
-                float(totalNodes.load() * sizeof(LinearBVHNode)) / (1024.f * 1024.f));
-    treeBytes += totalNodes * sizeof(LinearBVHNode) + sizeof(*this) +
+                float(totalNodes.load() * sizeof(LinearVQBVHNode)) / (1024.f * 1024.f));
+    treeBytes += totalNodes * sizeof(LinearVQBVHNode) + sizeof(*this) +
                  primitives.size() * sizeof(primitives[0]);
     nodes = new LinearVQBVHNode[totalNodes];
     int offset = 0;
@@ -1304,7 +1304,7 @@ int VQBVHAggregate::flattenVQBVH(BVHBuildNode *node, int *offset, Bounds3f paren
         linearNode->offset  = node->firstPrimOffset;
         linearNode->nPrimitives = node->nPrimitives;
         // surface voxelization
-        linearNode->mask = ~(0UL); // clear
+        // linearNode->mask = ~(0UL); // clear
 
     } else {
         // Create interior flattened BVH node
@@ -1314,8 +1314,8 @@ int VQBVHAggregate::flattenVQBVH(BVHBuildNode *node, int *offset, Bounds3f paren
         linearNode->offset = flattenVQBVH(node->children[1], offset, quantizedBounds[nodeOffset]);
         linearNode->mask = 0UL; // all clear 
         // computer mask for tighter bound, traverse childrens
-        hierarchicalMask(quantizedBounds[nodeOffset], linearNode, nodeOffset + 1, max_depth);
-        hierarchicalMask(quantizedBounds[nodeOffset], linearNode, linearNode->offset, max_depth);
+        // hierarchicalMask(quantizedBounds[nodeOffset], linearNode, nodeOffset + 1, max_depth);
+        // hierarchicalMask(quantizedBounds[nodeOffset], linearNode, linearNode->offset, max_depth);
     }
     voxels += 64;
     voxelSets += __builtin_popcountl(linearNode->mask);
@@ -1429,7 +1429,7 @@ pstd::optional<ShapeIntersection> VQBVHAggregate::Intersect(const Ray &ray,
 
         // Check ray against BVH node
         bool hit = currentBounds.IntersectP(ray.o, ray.d, tMax, invDir, dirIsNeg, t0, t1);
-        if(hit) hit = maskTest(currentBounds, ray, *node, t0, t1);
+        // if(hit) hit = maskTest(currentBounds, ray, *node, t0, t1);
 
         if (hit) {
             if (node->nPrimitives > 0) {
@@ -1495,7 +1495,7 @@ bool VQBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
         currentBounds = computeBounds(*node, currentBounds);
 
         bool hit = currentBounds.IntersectP(ray.o, ray.d, tMax, invDir, dirIsNeg, t0, t1);
-        if(hit) hit = maskTest(currentBounds, ray, *node, t0, t1);
+        // if(hit) hit = maskTest(currentBounds, ray, *node, t0, t1);
 
         if (hit) {
             // Process BVH node _node_ for traversal
