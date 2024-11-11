@@ -1603,7 +1603,6 @@ Primitive BasicScene::CreateAggregate(
         APs += (nullptr != prim.CastOrNullptr<AnimatedPrimitive>());
         BAs += (nullptr != prim.CastOrNullptr<BVHAggregate>());
         KAs += (nullptr != prim.CastOrNullptr<KdTreeAggregate>());
-        VAs += (nullptr != prim.CastOrNullptr<VQBVHAggregate>());
     }
     LOG_CONCISE("SimplePrimitive      : %lu", SPs);
     LOG_CONCISE("GeometricPrimitive   : %lu", GPs);
@@ -1611,7 +1610,6 @@ Primitive BasicScene::CreateAggregate(
     LOG_CONCISE("AnimatedPrimitive    : %lu", APs);
     LOG_CONCISE("BVHAggregate         : %lu", BAs);
     LOG_CONCISE("KdTreeAggregate      : %lu", KAs);
-    LOG_CONCISE("VQBVHAggregate       : %lu", VAs);
 
 
 
