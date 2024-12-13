@@ -69,6 +69,35 @@ class BVHAggregate {
     LinearBVHNode *nodes = nullptr;
 };
 
+struct WBVHBuildNode;
+struct LinearWBVHNode;
+
+class WBVHAggregate {
+  public:
+    // WBVHAggregate Public Methods
+    WBVHAggregate(std::vector<Primitive> p, int maxPrimsInNode = 1);
+    static WBVHAggregate *Create(std::vector<Primitive> prims, const ParameterDictionary &parameters);
+    Bounds3f Bounds() const;
+    pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax) const;
+    bool IntersectP(const Ray &ray, Float tMax) const;
+
+    constexpr static std::size_t WIDTH = 6;
+
+
+  private:
+    // WBVHAggregate Private Methods
+    WBVHBuildNode *buildRecursive(ThreadLocal<Allocator> &threadAllocators,
+                                  pstd::span<BVHPrimitive> bvhPrimitives,
+                                  std::atomic<int> *totalNodes,
+                                  std::atomic<int> *orderedPrimsOffset,
+                                  std::vector<Primitive> &orderedPrims);
+    int flattenWBVH(WBVHBuildNode *node, int locate, int offset);
+
+    int maxPrimsInNode;
+    std::vector<Primitive> primitives;
+    LinearWBVHNode *nodes = nullptr;
+};
+
 
 struct KdTreeNode;
 struct BoundEdge;

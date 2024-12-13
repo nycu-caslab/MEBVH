@@ -55,7 +55,7 @@ struct PBRTOptions : BasicPBRTOptions {
     pstd::optional<Point2i> pixelMaterial;
     Float displacementEdgeScale = 1;
 
-    bool VQBVH = false;
+    bool WBVH = false;
 
     std::string ToString() const;
 };

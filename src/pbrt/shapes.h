@@ -829,6 +829,7 @@ pstd::optional<TriangleIntersection> IntersectTriangle(const Ray &ray, Float tMa
                                                        Point3f p0, Point3f p1,
                                                        Point3f p2);
 
+
 // Triangle Definition
 class Triangle {
   public:

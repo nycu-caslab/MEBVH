@@ -168,10 +168,66 @@ void Triangle::Init(Allocator alloc) {
 
 STAT_MEMORY_COUNTER("Memory/Triangles", triangleBytes);
 
+
+#include <immintrin.h>
+
 // Triangle Functions
 pstd::optional<TriangleIntersection> IntersectTriangle(const Ray &ray, Float tMax,
                                                        Point3f p0, Point3f p1,
                                                        Point3f p2) {
+
+/*
+#ifndef PBRT_IS_GPU_CODE
+    __m128 pxt = _mm_sub_ps(_mm_set_ps(0.0f, p2[0], p1[0], p0[0]), _mm_set1_ps(ray.o[0]));
+    __m128 pyt = _mm_sub_ps(_mm_set_ps(0.0f, p2[1], p1[1], p0[1]), _mm_set1_ps(ray.o[1]));
+    __m128 pzt = _mm_sub_ps(_mm_set_ps(0.0f, p2[2], p1[2], p0[2]), _mm_set1_ps(ray.o[2]));
+
+    // Permute components of triangle vertices and ray direction
+    __m128 d = _mm_set_ps(0.0f, ray.d[2], ray.d[1], ray.d[0]);
+    if(std::abs(ray.d[0] > std::abs(ray.d[2]))){
+        std::swap(d[0], d[2]);
+        std::swap(pxt, pzt);
+    }
+    else if(std::abs(ray.d[1] > std::abs(ray.d[2]))){
+        std::swap(d[1], d[2]);
+        std::swap(pyt, pzt);
+    }
+    std::swap(d[0], d[1]);
+    std::swap(pxt, pyt);
+
+    // Apply shear transformation to translated vertex positions
+    pxt = _mm_fmadd_ps(_mm_set1_ps(-d[0] / d[2]), pzt, pxt);
+    pyt = _mm_fmadd_ps(_mm_set1_ps(-d[1] / d[2]), pzt, pyt);
+    constexpr int shuffle_3021 = _MM_SHUFFLE(3, 0, 2, 1);
+    constexpr int shuffle_3102 = _MM_SHUFFLE(3, 1, 0, 2);
+    __m128 e = _mm_sub_ps(
+        _mm_mul_ps(_mm_permute_ps(pxt, shuffle_3021), _mm_permute_ps(pyt, shuffle_3102)),
+        _mm_mul_ps(_mm_permute_ps(pyt, shuffle_3021), _mm_permute_ps(pxt, shuffle_3102))
+    );
+
+    if (_mm_movemask_ps(_mm_cmplt_ps(e, _mm_setzero_ps())) && _mm_movemask_ps(_mm_cmpgt_ps(e, _mm_setzero_ps())))
+        return {};
+        
+    Float det = _mm_dp_ps(e, _mm_set1_ps(1.0f), 0b01110001)[0];
+    if(det == 0)
+        return {};
+
+    pzt = _mm_mul_ps(_mm_set1_ps(1.0f / d[2]), pzt);
+    Float tScaled = _mm_dp_ps(e, pzt, 0b01110001)[0];
+
+    if(det < 0 && (tScaled >= 0 || tScaled < tMax * det))
+        return {};
+    else if(det > 0 && (tScaled <= 0 || tScaled > tMax * det))
+        return {};
+
+    // compute barycentric coordinates and $t$ value for triangle intersection
+    e[3] = tScaled;
+    e = _mm_mul_ps(e, _mm_set1_ps(1 / det));
+    // b0, b1, b2, t
+    return TriangleIntersection{e[0], e[1], e[2], e[3]};
+#else
+*/
+
     // Return no intersection if triangle is degenerate
     if (LengthSquared(Cross(p2 - p0, p1 - p0)) == 0)
         return {};
@@ -184,12 +240,9 @@ pstd::optional<TriangleIntersection> IntersectTriangle(const Ray &ray, Float tMa
 
     // Permute components of triangle vertices and ray direction
     int kz = MaxComponentIndex(Abs(ray.d));
-    int kx = kz + 1;
-    if (kx == 3)
-        kx = 0;
-    int ky = kx + 1;
-    if (ky == 3)
-        ky = 0;
+    int kx = (kz == 2)? 0: kz + 1;
+    int ky = (kx == 2)? 0: kx + 1;
+    
     Vector3f d = Permute(ray.d, {kx, ky, kz});
     p0t = Permute(p0t, {kx, ky, kz});
     p1t = Permute(p1t, {kx, ky, kz});
@@ -270,7 +323,10 @@ pstd::optional<TriangleIntersection> IntersectTriangle(const Ray &ray, Float tMa
 
     // Return _TriangleIntersection_ for intersection
     return TriangleIntersection{b0, b1, b2, t};
+// #endif
+
 }
+
 
 // Triangle Method Definitions
 pstd::vector<Shape> Triangle::CreateTriangles(const TriangleMesh *mesh, Allocator alloc) {
@@ -1398,11 +1454,13 @@ pstd::vector<Shape> Shape::Create(
         shapes = {Cylinder::Create(renderFromObject, objectFromRender, reverseOrientation,
                                    parameters, loc, alloc)};
         ++nCylinders;
-    } else if (name == "disk") {
+    }
+    else if (name == "disk") {
         shapes = {Disk::Create(renderFromObject, objectFromRender, reverseOrientation,
                                parameters, loc, alloc)};
         ++nDisks;
-    } else if (name == "bilinearmesh") {
+    }
+    else if (name == "bilinearmesh") {
         BilinearPatchMesh *mesh = BilinearPatch::CreateMesh(
             renderFromObject, reverseOrientation, parameters, loc, alloc);
         shapes = BilinearPatch::CreatePatches(mesh, alloc);
@@ -1415,7 +1473,8 @@ pstd::vector<Shape> Shape::Create(
         TriangleMesh *mesh = Triangle::CreateMesh(renderFromObject, reverseOrientation,
                                                   parameters, loc, alloc);
         shapes = Triangle::CreateTriangles(mesh, alloc);
-    } else if (name == "plymesh") {
+    }
+    else if (name == "plymesh") {
         std::string filename = ResolveFilename(parameters.GetOneString("filename", ""));
         TriQuadMesh plyMesh = TriQuadMesh::ReadPLY(filename);
 
@@ -1473,7 +1532,8 @@ pstd::vector<Shape> Shape::Create(
             pstd::vector<Shape> quadMesh = BilinearPatch::CreatePatches(mesh, alloc);
             shapes.insert(shapes.end(), quadMesh.begin(), quadMesh.end());
         }
-    } else if (name == "loopsubdiv") {
+    }
+    else if (name == "loopsubdiv") {
         int nLevels = parameters.GetOneInt("levels", 3);
         std::vector<int> vertexIndices = parameters.GetIntArray("indices");
         if (vertexIndices.empty())
@@ -1491,7 +1551,8 @@ pstd::vector<Shape> Shape::Create(
                                            vertexIndices, P, alloc);
 
         shapes = Triangle::CreateTriangles(mesh, alloc);
-    } else
+    }
+    else
         ErrorExit(loc, "%s: shape type unknown.", name);
 
     if (shapes.empty())

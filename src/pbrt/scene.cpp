@@ -94,8 +94,8 @@ BasicSceneBuilder::BasicSceneBuilder(BasicScene *scene)
     filter.name = SceneEntity::internedStrings.Lookup("gaussian");
     integrator.name = SceneEntity::internedStrings.Lookup("volpath");
     accelerator.name = SceneEntity::internedStrings.Lookup("bvh");
-    if(Options->VQBVH)
-        accelerator.name = SceneEntity::internedStrings.Lookup("vqbvh");
+    if(Options->WBVH)
+        accelerator.name = SceneEntity::internedStrings.Lookup("wbvh");
 
     film.name = SceneEntity::internedStrings.Lookup("rgb");
     film.parameters = ParameterDictionary({}, RGBColorSpace::sRGB);
@@ -1391,6 +1391,7 @@ Primitive BasicScene::CreateAggregate(
         // Parallelize Shape::Create calls, which will in turn
         // parallelize PLY file loading, etc...
         pstd::vector<pstd::vector<pbrt::Shape>> shapeVectors(shapes.size());
+        
         ParallelFor(0, shapes.size(), [&](int64_t i) {
             const auto &sh = shapes[i];
             shapeVectors[i] = Shape::Create(
