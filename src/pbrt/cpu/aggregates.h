@@ -47,7 +47,8 @@ class BVHAggregate {
                                  pstd::span<BVHPrimitive> bvhPrimitives,
                                  std::atomic<int> *totalNodes,
                                  std::atomic<int> *orderedPrimsOffset,
-                                 std::vector<Primitive> &orderedPrims);
+                                 std::vector<Primitive> &orderedPrims
+                                );
     BVHBuildNode *buildHLBVH(Allocator alloc,
                              const std::vector<BVHPrimitive> &primitiveInfo,
                              std::atomic<int> *totalNodes,
@@ -90,7 +91,8 @@ class WBVHAggregate {
                                   pstd::span<BVHPrimitive> bvhPrimitives,
                                   std::atomic<int> *totalNodes,
                                   std::atomic<int> *orderedPrimsOffset,
-                                  std::vector<Primitive> &orderedPrims);
+                                  std::vector<Primitive> &orderedPrims,
+                                  int depth = 0);
     int flattenWBVH(WBVHBuildNode *node, int locate, int offset);
 
     int maxPrimsInNode;
