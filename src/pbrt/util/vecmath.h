@@ -1585,8 +1585,8 @@ PBRT_CPU_GPU inline bool Bounds3<T>::IntersectP(Point3f o, Vector3f d, Float ray
     Float tyMin = (bounds[dirIsNeg[1]].y - o.y) * invDir.y;
     Float tyMax = (bounds[1 - dirIsNeg[1]].y - o.y) * invDir.y;
     // Update _tMax_ and _tyMax_ to ensure robust bounds intersection
-    tMax *= 1 + 2 * gamma(3);
-    tyMax *= 1 + 2 * gamma(3);
+    // tMax *= 1 + 2 * gamma(3);
+    // tyMax *= 1 + 2 * gamma(3);
 
     if (tMin > tyMax || tyMin > tMax)
         return false;
@@ -1599,7 +1599,7 @@ PBRT_CPU_GPU inline bool Bounds3<T>::IntersectP(Point3f o, Vector3f d, Float ray
     Float tzMin = (bounds[dirIsNeg[2]].z - o.z) * invDir.z;
     Float tzMax = (bounds[1 - dirIsNeg[2]].z - o.z) * invDir.z;
     // Update _tzMax_ to ensure robust bounds intersection
-    tzMax *= 1 + 2 * gamma(3);
+    // tzMax *= 1 + 2 * gamma(3);
 
     if (tMin > tzMax || tzMin > tMax)
         return false;

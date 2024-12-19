@@ -763,26 +763,44 @@ struct WBVHBuildNode {
         uint32_t mid() { return (start + end) / 2; }
     } subNodes[WBVHAggregate::WIDTH];
 
+    static bool octantCompare(const WBVHBuildNode::SubNode &a, const WBVHBuildNode::SubNode &b){
+        auto a_centriod = (a.bounds.pMin + a.bounds.pMax) * 0.5f;
+        auto b_centriod = (b.bounds.pMin + b.bounds.pMax) * 0.5f;
+        return a_centriod.x < b_centriod.x;
+    }
+
+    void sort(){
+        std::sort(subNodes, subNodes + WBVHAggregate::WIDTH, octantCompare);
+    }
+
     std::string ToString(){
         std::string str = "";
         for(int i=0; i<WBVHAggregate::WIDTH; ++i){
-            str += pbrt::StringPrintf("[%d] nPrimitives: %d, firstPrimOffset: %d, se %d -> %d, bounds: %s\n",
+            str += pbrt::StringPrintf("[%d] nPrimitives: %d, firstPrimOffset: %d, se %d -> %d, bound center: %s\n",
                 i,
                 subNodes[i].nPrimitives,
                 subNodes[i].firstPrimOffset,
                 subNodes[i].start,
                 subNodes[i].end,
-                subNodes[i].bounds.ToString().c_str()
+                ((subNodes[i].bounds.pMin + subNodes[i].bounds.pMax) * .5f).ToString()
             );
         }
-        return ToString();
+        return str;
     }
 
 };
 
 
+#include <immintrin.h>
+
 struct LinearWBVHNode {
     Bounds3f bounds[WBVHAggregate::WIDTH]; // require octant sorted 
+    /*
+    Float bounds[3][2][WBVHAggregate::WIDTH]; // [dims][min/max][0 ~ WIDTH]
+    
+    */
+
+
     int      offsets[WBVHAggregate::WIDTH];
     uint32_t nPrimitives[WBVHAggregate::WIDTH];
     inline bool isInternal(const int &i) const {
@@ -794,6 +812,13 @@ struct LinearWBVHNode {
     inline bool isEmpty(const int &i) const {
         return nPrimitives[i] == 0 && offsets[i] == 0;
     }
+
+    uint32_t IntersectSIMD(const Point3f &ray_o, const Vector3f &ray_d, const Float &tMax, const int invDir[3], const int dirIsNeg[3]) const {
+        // TODO: implement SIMD intersection
+        // 
+        return 0;
+    }
+
 };
 
 
@@ -886,10 +911,6 @@ WBVHAggregate::WBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode)
     nodes = new LinearWBVHNode[totalNodes];
     int offset = flattenWBVH(root, 0, 1);
 
-    // LOG_CONCISE("start checking enclose");
-    // checkEnclose(nodes, 0, primitives);
-    // LOG_CONCISE("end checking enclose");
-
     CHECK_EQ(totalNodes.load(), offset);
 }
 
@@ -901,7 +922,7 @@ WBVHBuildNode *WBVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAlloc
                                            std::vector<Primitive> &orderedPrims,
                                            int depth) {
     DCHECK_NE(bvhPrimitives.size(), 0);
-    DCHECK_LE(depth, 64);
+    CHECK_LE(depth, 36);
     
     Allocator alloc = threadAllocators.Get();
     WBVHBuildNode *node = alloc.new_object<WBVHBuildNode>();
@@ -930,6 +951,8 @@ WBVHBuildNode *WBVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAlloc
             if(area <= 0)
                 // prevent internal node with zero area, which leads to infinite recursion
                 node->subNodes[i].type = WBVHBuildNode::SubNode::LEAF;
+            else if(node->subNodes[i].size() == 0)
+                node->subNodes[i].type = WBVHBuildNode::SubNode::LEAF;
             else if (node->subNodes[i].type == WBVHBuildNode::SubNode::INTERNAL && area > largestArea){
                 largestArea = node->subNodes[i].bounds.SurfaceArea();
                 largestChild = i;
@@ -939,6 +962,13 @@ WBVHBuildNode *WBVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAlloc
             break;
 
         WBVHBuildNode::SubNode &target = node->subNodes[largestChild];
+        if(target.size() < 1){
+
+            printf("target bounds: %s\n", target.bounds.ToString().c_str());
+            printf("target size: %d\n", target.size());
+            printf("target start: %d\n", target.start);
+            printf("target end: %d\n", target.end);
+        }
         CHECK(target.size() >= 1);
         
         if(target.bounds.SurfaceArea() == 0 || target.size() == 1){
@@ -1088,35 +1118,82 @@ WBVHBuildNode *WBVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAlloc
     }
 
     // TODO:: octant sort
+    node->sort();
+
+
+
 
     // TODO:: add thread version
-    for(int i = 0; i < builtChildCnt; i++){
-        if(node->subNodes[i].type == WBVHBuildNode::SubNode::INTERNAL){
-            node->subNodes[i].child = buildRecursive(
-                threadAllocators,
-                bvhPrimitives.subspan(node->subNodes[i].start, node->subNodes[i].size()),
-                totalNodes,
-                orderedPrimsOffset,
-                orderedPrims,
-                depth + 1
-            );
-            node->subNodes[i].nPrimitives = 0;
-            node->subNodes[i].firstPrimOffset = 0;
-        }
-        else if(node->subNodes[i].type == WBVHBuildNode::SubNode::LEAF){
-            node->subNodes[i].child = nullptr;
-            node->subNodes[i].nPrimitives = node->subNodes[i].size();
-            int firstPrimOffset = orderedPrimsOffset->fetch_add(node->subNodes[i].size());
-            node->subNodes[i].firstPrimOffset = firstPrimOffset;
-            for(int prim = 0; prim < node->subNodes[i].size(); prim++){
-                int index = bvhPrimitives[node->subNodes[i].start + prim].primitiveIndex;
-                orderedPrims[firstPrimOffset + prim] = primitives[index];
+    // current problem: thread will segfault / stack smashing
+    if(bvhPrimitives.size() > 128 * 1024){
+        ParallelFor(0, WBVHAggregate::WIDTH, [&](int i){
+            if(node->subNodes[i].type == WBVHBuildNode::SubNode::EMPTY)
+                return;
+            
+            // if(node->subNodes[i].size() <= WBVHAggregate::WIDTH)
+            //     node->subNodes[i].type = WBVHBuildNode::SubNode::LEAF;
+            
+            if(node->subNodes[i].type == WBVHBuildNode::SubNode::INTERNAL){
+                node->subNodes[i].child = buildRecursive(
+                    threadAllocators,
+                    bvhPrimitives.subspan(node->subNodes[i].start, node->subNodes[i].size()),
+                    totalNodes,
+                    orderedPrimsOffset,
+                    orderedPrims,
+                    depth + 1
+                );
+                node->subNodes[i].nPrimitives = 0;
+                node->subNodes[i].firstPrimOffset = 0;
+            }
+            else if(node->subNodes[i].type == WBVHBuildNode::SubNode::LEAF){
+                node->subNodes[i].child = nullptr;
+                node->subNodes[i].nPrimitives = node->subNodes[i].size();
+                int firstPrimOffset = orderedPrimsOffset->fetch_add(node->subNodes[i].size());
+                node->subNodes[i].firstPrimOffset = firstPrimOffset;
+                for(int prim = 0; prim < node->subNodes[i].size(); prim++){
+                    int index = bvhPrimitives[node->subNodes[i].start + prim].primitiveIndex;
+                    orderedPrims[firstPrimOffset + prim] = primitives[index];
+                }
+            }
+        });    
+    }
+    else{
+        for(int i = 0; i < WBVHAggregate::WIDTH; i++){
+            if(node->subNodes[i].type == WBVHBuildNode::SubNode::EMPTY){
+                continue;
+            }
+
+            // if(node->subNodes[i].size() <= WBVHAggregate::WIDTH)
+            //     node->subNodes[i].type = WBVHBuildNode::SubNode::LEAF;
+
+            if(node->subNodes[i].type == WBVHBuildNode::SubNode::INTERNAL){
+                node->subNodes[i].child = buildRecursive(
+                    threadAllocators,
+                    bvhPrimitives.subspan(node->subNodes[i].start, node->subNodes[i].size()),
+                    totalNodes,
+                    orderedPrimsOffset,
+                    orderedPrims,
+                    depth + 1
+                );
+                node->subNodes[i].nPrimitives = 0;
+                node->subNodes[i].firstPrimOffset = 0;
+            }
+            else if(node->subNodes[i].type == WBVHBuildNode::SubNode::LEAF){
+                node->subNodes[i].child = nullptr;
+                node->subNodes[i].nPrimitives = node->subNodes[i].size();
+                int firstPrimOffset = orderedPrimsOffset->fetch_add(node->subNodes[i].size());
+                node->subNodes[i].firstPrimOffset = firstPrimOffset;
+                for(int prim = 0; prim < node->subNodes[i].size(); prim++){
+                    int index = bvhPrimitives[node->subNodes[i].start + prim].primitiveIndex;
+                    orderedPrims[firstPrimOffset + prim] = primitives[index];
+                }
             }
         }
-        else {
-            CHECK(false);
-        }
+
     }
+
+
+  
 
     return node;
 }
@@ -1165,18 +1242,30 @@ pstd::optional<ShapeIntersection> WBVHAggregate::Intersect(const Ray &ray, Float
     pstd::optional<ShapeIntersection> si;
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
     int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
+    uint8_t rayOctant = (uint8_t(invDir.x < 0) << 2) | (uint8_t(invDir.y < 0)  << 1) | (uint8_t(invDir.z < 0));
     // Follow ray through BVH nodes to find primitive intersections
     int toVisitOffset = 1;
     int nodesToVisit[64];
     int nodesVisited = 0;
     nodesToVisit[0] = 0;
-    
+
+    // reverse stack
+    int reverseStack[WBVHAggregate::WIDTH];
+
 
     while (toVisitOffset > 0) {
         ++nodesVisited;
+        
+        int reverseStackOffset = 0;
+
         const LinearWBVHNode *node = &nodes[nodesToVisit[--toVisitOffset]];
-        for(int child = 0; child < WBVHAggregate::WIDTH; ++child){
-            if(node->bounds[child].IntersectP(ray.o, ray.d, tMax, invDir, dirIsNeg)){
+        for(uint8_t octant = 0; octant < 8; ++octant){
+            int child = octant ^ rayOctant;
+            if(child >= WBVHAggregate::WIDTH)
+                continue;
+            else if(node->isEmpty(child))
+                continue;
+            else if(node->bounds[child].IntersectP(ray.o, ray.d, tMax, invDir, dirIsNeg)){
                 if(node->isLeaf(child)){
                     for(int i=0; i < node->nPrimitives[child]; ++i){
                         pstd::optional<ShapeIntersection> primSi =
@@ -1188,10 +1277,12 @@ pstd::optional<ShapeIntersection> WBVHAggregate::Intersect(const Ray &ray, Float
                     }
                 }
                 else if(node->isInternal(child)){
-                    
-                    nodesToVisit[toVisitOffset++] = node->offsets[child];
+                    reverseStack[reverseStackOffset++] = node->offsets[child];
                 }
             }
+        }
+        while(reverseStackOffset--){
+            nodesToVisit[toVisitOffset++] = reverseStack[reverseStackOffset];
         }
     }
     bvhNodesVisited += nodesVisited;
@@ -1204,20 +1295,25 @@ bool WBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
 
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
     int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
+    uint8_t rayOctant = (uint8_t(invDir.x < 0) << 2) | (uint8_t(invDir.y < 0)  << 1) | (uint8_t(invDir.z < 0));
     // Follow ray through BVH nodes to find primitive intersections
+
     int toVisitOffset = 1;
     int nodesToVisit[64];
     int nodesVisited = 0;
     nodesToVisit[0] = 0;
-    
+
     while (toVisitOffset > 0) {
         ++nodesVisited;
         const LinearWBVHNode *node = &nodes[nodesToVisit[--toVisitOffset]];
         // Check ray against BVH node
+
         for(int child = 0; child < WBVHAggregate::WIDTH; ++child){
-            if(node->isEmpty(child))
+            if(child >= WBVHAggregate::WIDTH)
                 continue;
-            if(node->bounds[child].IntersectP(ray.o, ray.d, tMax, invDir, dirIsNeg)){
+            else if(node->isEmpty(child))
+                continue;
+            else if(node->bounds[child].IntersectP(ray.o, ray.d, tMax, invDir, dirIsNeg)){
                 if(node->isLeaf(child)){
                     for(int i=0; i< node->nPrimitives[child]; ++i){
                         if(primitives[node->offsets[child] + i].IntersectP(ray, tMax)){
