@@ -793,13 +793,11 @@ struct WBVHBuildNode {
 
 #include <immintrin.h>
 
-struct LinearWBVHNode {
-    Bounds3f bounds[WBVHAggregate::WIDTH]; // require octant sorted 
-    /*
-    Float bounds[3][2][WBVHAggregate::WIDTH]; // [dims][min/max][0 ~ WIDTH]
-    
-    */
+struct alignas(32) LinearWBVHNode {
 
+    // Bounds3f bounds[WBVHAggregate::WIDTH];
+    // Float AABB[3][2][WBVHAggregate::WIDTH]; // [dims][min/max][0 ~ WIDTH]
+    __m256 AABB[3][2];
 
     int      offsets[WBVHAggregate::WIDTH];
     uint32_t nPrimitives[WBVHAggregate::WIDTH];
@@ -813,54 +811,68 @@ struct LinearWBVHNode {
         return nPrimitives[i] == 0 && offsets[i] == 0;
     }
 
-    uint32_t IntersectSIMD(const Point3f &ray_o, const Vector3f &ray_d, const Float &tMax, const int invDir[3], const int dirIsNeg[3]) const {
-        // TODO: implement SIMD intersection
-        // 
-        return 0;
+    inline void initAABB(const int &i, const Bounds3f &b){
+        AABB[0][0][i] = b.pMin.x;
+        AABB[0][1][i] = b.pMax.x;
+        AABB[1][0][i] = b.pMin.y;
+        AABB[1][1][i] = b.pMax.y;
+        AABB[2][0][i] = b.pMin.z;
+        AABB[2][1][i] = b.pMax.z;
+    }
+
+    std::array<bool, WBVHAggregate::WIDTH> IntersectSIMD(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, Vector3f invDir, const int dirIsNeg[3]) const {
+
+        __m256 ray_o_xyz  = _mm256_set1_ps(ray_o.x);
+        __m256 invDir_xyz = _mm256_set1_ps(invDir.x);
+        __m256 tMin_xyz = _mm256_mul_ps(_mm256_sub_ps(AABB[0][    dirIsNeg[0]], ray_o_xyz), invDir_xyz);
+        __m256 tMax_xyz = _mm256_mul_ps(_mm256_sub_ps(AABB[0][1 - dirIsNeg[0]], ray_o_xyz), invDir_xyz);
+
+        ray_o_xyz  = _mm256_set1_ps(ray_o.y);
+        invDir_xyz = _mm256_set1_ps(invDir.y);
+        tMin_xyz = _mm256_max_ps(
+            tMin_xyz,
+            _mm256_mul_ps(
+                _mm256_sub_ps(AABB[1][dirIsNeg[1]], ray_o_xyz),
+                invDir_xyz
+            )
+        );
+        tMax_xyz = _mm256_min_ps(
+            tMax_xyz,
+            _mm256_mul_ps(
+                _mm256_sub_ps(AABB[1][1 - dirIsNeg[1]], ray_o_xyz),
+                invDir_xyz
+            )
+        );
+
+        ray_o_xyz = _mm256_set1_ps(ray_o.z);
+        invDir_xyz = _mm256_set1_ps(invDir.z);
+        tMin_xyz = _mm256_max_ps(
+            tMin_xyz,
+            _mm256_mul_ps(
+                _mm256_sub_ps(AABB[2][dirIsNeg[2]], ray_o_xyz),
+                invDir_xyz
+            )
+        );
+        tMax_xyz = _mm256_min_ps(
+            tMax_xyz,
+            _mm256_mul_ps(
+                _mm256_sub_ps(AABB[2][1 - dirIsNeg[2]], ray_o_xyz),
+                invDir_xyz
+            )
+        );
+    
+        __m256 t_cmp = _mm256_cmp_ps(tMin_xyz, tMax_xyz, _CMP_LE_OQ);        
+        t_cmp = _mm256_and_ps(t_cmp, _mm256_cmp_ps(tMax_xyz, _mm256_setzero_ps(), _CMP_GT_OQ));
+        t_cmp = _mm256_and_ps(t_cmp, _mm256_cmp_ps(tMin_xyz, _mm256_set1_ps(raytMax), _CMP_LT_OQ));
+
+        std::array<bool, WBVHAggregate::WIDTH> hit;
+        for(int i=0; i<WBVHAggregate::WIDTH; ++i)
+            hit[i] = std::isnan(t_cmp[i]);
+        
+        return hit;
     }
 
 };
-
-
-
-void printLinearWBVHBuildNode(LinearWBVHNode *node, int depth) {
-    for (int i = 0; i < WBVHAggregate::WIDTH; i++) {
-        for (int j = 0; j < depth; j++)
-            printf("  ");
-
-        printf("[%d] nPrimitives: %d, firstPrimOffset: %d, bounds: %s\n",
-            i,
-            node->nPrimitives[i],
-            node->offsets[i],
-            node->bounds[i].ToString().c_str()
-        );
-
-        if(node->nPrimitives[i] == 0)
-            printLinearWBVHBuildNode(node + node->offsets[i], depth + 1);
-    }
-}
-
-void checkEnclose(LinearWBVHNode nodes[], int node_index, std::vector<Primitive> &primitives) {
-    printf("check node_index: %d\n", node_index);
-
-    auto &node = nodes[node_index];
-    for(int i=0; i<WBVHAggregate::WIDTH; ++i){
-        if(node.nPrimitives[i] == 0){
-            checkEnclose(nodes, node.offsets[i], primitives);
-        }
-        else{
-            for(int j=0; j< node.nPrimitives[i]; ++j){
-                int prim_index = node.offsets[i] + j;
-                for(int k=0; k<3; ++k){
-                    CHECK_GE(primitives[prim_index].Bounds().pMin[k], node.bounds[i].pMin[k]);
-                    CHECK_LE(primitives[prim_index].Bounds().pMax[k], node.bounds[i].pMax[k]);
-                }
-            }
-        }
-    }
-    printf("end check node_index: %d\n", node_index);
-}
-
 
 // WBVH Method Definitions
 WBVHAggregate::WBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode)
@@ -899,6 +911,10 @@ WBVHAggregate::WBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode)
 
     primitives.swap(orderedPrims);
 
+    // construct gbounds
+    gbounds = Bounds3f();
+    for (const auto &subNode: root->subNodes)
+        gbounds = Union(gbounds, subNode.bounds);
 
     // Convert BVH into compact representation in _nodes_ array
     bvhPrimitives.resize(0);
@@ -910,6 +926,8 @@ WBVHAggregate::WBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode)
                  primitives.size() * sizeof(primitives[0]);
     nodes = new LinearWBVHNode[totalNodes];
     int offset = flattenWBVH(root, 0, 1);
+
+    LOG_CONCISE("Linear WBVH size: %d\n", sizeof(LinearWBVHNode));
 
     CHECK_EQ(totalNodes.load(), offset);
 }
@@ -952,7 +970,7 @@ WBVHBuildNode *WBVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAlloc
                 // prevent internal node with zero area, which leads to infinite recursion
                 node->subNodes[i].type = WBVHBuildNode::SubNode::LEAF;
             else if(node->subNodes[i].size() == 0)
-                node->subNodes[i].type = WBVHBuildNode::SubNode::LEAF;
+                node->subNodes[i].type = WBVHBuildNode::SubNode::EMPTY;
             else if (node->subNodes[i].type == WBVHBuildNode::SubNode::INTERNAL && area > largestArea){
                 largestArea = node->subNodes[i].bounds.SurfaceArea();
                 largestChild = i;
@@ -962,13 +980,6 @@ WBVHBuildNode *WBVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAlloc
             break;
 
         WBVHBuildNode::SubNode &target = node->subNodes[largestChild];
-        if(target.size() < 1){
-
-            printf("target bounds: %s\n", target.bounds.ToString().c_str());
-            printf("target size: %d\n", target.size());
-            printf("target start: %d\n", target.start);
-            printf("target end: %d\n", target.end);
-        }
         CHECK(target.size() >= 1);
         
         if(target.bounds.SurfaceArea() == 0 || target.size() == 1){
@@ -1117,14 +1128,10 @@ WBVHBuildNode *WBVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAlloc
         }           
     }
 
-    // TODO:: octant sort
+    // octant sort
     node->sort();
 
 
-
-
-    // TODO:: add thread version
-    // current problem: thread will segfault / stack smashing
     if(bvhPrimitives.size() > 128 * 1024){
         ParallelFor(0, WBVHAggregate::WIDTH, [&](int i){
             if(node->subNodes[i].type == WBVHBuildNode::SubNode::EMPTY)
@@ -1201,9 +1208,6 @@ WBVHBuildNode *WBVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAlloc
 int WBVHAggregate::flattenWBVH(WBVHBuildNode *node, int locate, int offset) {
     LinearWBVHNode *linearNode = &nodes[locate];
 
-    // TODO::octant sort
-    // ...
-
     int internalCnt = 0;
     for(int i = 0; i < WBVHAggregate::WIDTH; i++)
         internalCnt += node->subNodes[i].type == WBVHBuildNode::SubNode::INTERNAL ? 1 : 0;
@@ -1212,19 +1216,22 @@ int WBVHAggregate::flattenWBVH(WBVHBuildNode *node, int locate, int offset) {
 
     for(int i = 0; i < WBVHAggregate::WIDTH; i++){
         if(node->subNodes[i].type == WBVHBuildNode::SubNode::EMPTY){
-            linearNode->bounds[i] = Bounds3f();
+            linearNode->initAABB(i, Bounds3f());
+            // linearNode->bounds[i] = Bounds3f();
             linearNode->offsets[i] = 0;
             linearNode->nPrimitives[i] = 0;
             continue;
         }
         else if(node->subNodes[i].type == WBVHBuildNode::SubNode::INTERNAL){
-            linearNode->bounds[i] = node->subNodes[i].bounds;
+            linearNode->initAABB(i, node->subNodes[i].bounds);
+            // linearNode->bounds[i] = node->subNodes[i].bounds;
             linearNode->nPrimitives[i] = 0;
             linearNode->offsets[i] = offset + (internalCnt++);
             next_offset = flattenWBVH(node->subNodes[i].child, linearNode->offsets[i], next_offset);
         }
         else if(node->subNodes[i].type == WBVHBuildNode::SubNode::LEAF){
-            linearNode->bounds[i] = node->subNodes[i].bounds;
+            linearNode->initAABB(i, node->subNodes[i].bounds);
+            // linearNode->bounds[i] = node->subNodes[i].bounds;
             linearNode->nPrimitives[i] = node->subNodes[i].nPrimitives;
             linearNode->offsets[i] = node->subNodes[i].firstPrimOffset;
         }
@@ -1238,34 +1245,24 @@ int WBVHAggregate::flattenWBVH(WBVHBuildNode *node, int locate, int offset) {
 pstd::optional<ShapeIntersection> WBVHAggregate::Intersect(const Ray &ray, Float tMax) const {
     if (!nodes)
         return {};
-
+        
     pstd::optional<ShapeIntersection> si;
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
     int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
     uint8_t rayOctant = (uint8_t(invDir.x < 0) << 2) | (uint8_t(invDir.y < 0)  << 1) | (uint8_t(invDir.z < 0));
-    // Follow ray through BVH nodes to find primitive intersections
     int toVisitOffset = 1;
     int nodesToVisit[64];
-    int nodesVisited = 0;
-    nodesToVisit[0] = 0;
-
-    // reverse stack
-    int reverseStack[WBVHAggregate::WIDTH];
-
+    int nodesVisited = nodesToVisit[0] = 0;
 
     while (toVisitOffset > 0) {
         ++nodesVisited;
-        
-        int reverseStackOffset = 0;
-
         const LinearWBVHNode *node = &nodes[nodesToVisit[--toVisitOffset]];
-        for(uint8_t octant = 0; octant < 8; ++octant){
+        auto hit = node->IntersectSIMD(ray.o, ray.d, tMax, invDir, dirIsNeg);
+        for(int octant = 7; octant >= 0; --octant){
             int child = octant ^ rayOctant;
             if(child >= WBVHAggregate::WIDTH)
                 continue;
-            else if(node->isEmpty(child))
-                continue;
-            else if(node->bounds[child].IntersectP(ray.o, ray.d, tMax, invDir, dirIsNeg)){
+            else if(hit[child]){
                 if(node->isLeaf(child)){
                     for(int i=0; i < node->nPrimitives[child]; ++i){
                         pstd::optional<ShapeIntersection> primSi =
@@ -1277,12 +1274,9 @@ pstd::optional<ShapeIntersection> WBVHAggregate::Intersect(const Ray &ray, Float
                     }
                 }
                 else if(node->isInternal(child)){
-                    reverseStack[reverseStackOffset++] = node->offsets[child];
+                    nodesToVisit[toVisitOffset++] = node->offsets[child];
                 }
             }
-        }
-        while(reverseStackOffset--){
-            nodesToVisit[toVisitOffset++] = reverseStack[reverseStackOffset];
         }
     }
     bvhNodesVisited += nodesVisited;
@@ -1295,7 +1289,6 @@ bool WBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
 
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
     int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
-    uint8_t rayOctant = (uint8_t(invDir.x < 0) << 2) | (uint8_t(invDir.y < 0)  << 1) | (uint8_t(invDir.z < 0));
     // Follow ray through BVH nodes to find primitive intersections
 
     int toVisitOffset = 1;
@@ -1306,14 +1299,14 @@ bool WBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
     while (toVisitOffset > 0) {
         ++nodesVisited;
         const LinearWBVHNode *node = &nodes[nodesToVisit[--toVisitOffset]];
-        // Check ray against BVH node
+        auto hit = node->IntersectSIMD(ray.o, ray.d, tMax, invDir, dirIsNeg);
 
         for(int child = 0; child < WBVHAggregate::WIDTH; ++child){
             if(child >= WBVHAggregate::WIDTH)
                 continue;
             else if(node->isEmpty(child))
                 continue;
-            else if(node->bounds[child].IntersectP(ray.o, ray.d, tMax, invDir, dirIsNeg)){
+            else if(hit[child]){
                 if(node->isLeaf(child)){
                     for(int i=0; i< node->nPrimitives[child]; ++i){
                         if(primitives[node->offsets[child] + i].IntersectP(ray, tMax)){
@@ -1340,13 +1333,7 @@ WBVHAggregate *WBVHAggregate::Create(std::vector<Primitive> prims,
 }
 
 Bounds3f WBVHAggregate::Bounds() const {
-    Bounds3f bounds;
-    if(!nodes)
-        return bounds;
-    for(int i = 0; i < WBVHAggregate::WIDTH; i++){
-        bounds = Union(bounds, nodes[0].bounds[i]);
-    }
-    return bounds;
+    return gbounds;
 }
 
 // KdNodeToVisit Definition

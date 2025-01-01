@@ -82,7 +82,7 @@ class WBVHAggregate {
     pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax) const;
     bool IntersectP(const Ray &ray, Float tMax) const;
 
-    constexpr static std::size_t WIDTH = 6;
+    constexpr static std::size_t WIDTH = 8;
 
 
   private:
@@ -96,6 +96,7 @@ class WBVHAggregate {
     int flattenWBVH(WBVHBuildNode *node, int locate, int offset);
 
     int maxPrimsInNode;
+    Bounds3f gbounds;
     std::vector<Primitive> primitives;
     LinearWBVHNode *nodes = nullptr;
 };

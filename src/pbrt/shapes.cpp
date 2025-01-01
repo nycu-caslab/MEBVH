@@ -171,13 +171,14 @@ STAT_MEMORY_COUNTER("Memory/Triangles", triangleBytes);
 
 #include <immintrin.h>
 
+// #define RAYTRIANGLE_SIMD
 // Triangle Functions
 pstd::optional<TriangleIntersection> IntersectTriangle(const Ray &ray, Float tMax,
                                                        Point3f p0, Point3f p1,
                                                        Point3f p2) {
 
-/*
-#ifndef PBRT_IS_GPU_CODE
+
+#if defined(RAYTRIANGLE_SIMD) && !defined(PBRT_IS_GPU_CODE) 
     __m128 pxt = _mm_sub_ps(_mm_set_ps(0.0f, p2[0], p1[0], p0[0]), _mm_set1_ps(ray.o[0]));
     __m128 pyt = _mm_sub_ps(_mm_set_ps(0.0f, p2[1], p1[1], p0[1]), _mm_set1_ps(ray.o[1]));
     __m128 pzt = _mm_sub_ps(_mm_set_ps(0.0f, p2[2], p1[2], p0[2]), _mm_set1_ps(ray.o[2]));
@@ -226,7 +227,7 @@ pstd::optional<TriangleIntersection> IntersectTriangle(const Ray &ray, Float tMa
     // b0, b1, b2, t
     return TriangleIntersection{e[0], e[1], e[2], e[3]};
 #else
-*/
+
 
     // Return no intersection if triangle is degenerate
     if (LengthSquared(Cross(p2 - p0, p1 - p0)) == 0)
@@ -323,7 +324,7 @@ pstd::optional<TriangleIntersection> IntersectTriangle(const Ray &ray, Float tMa
 
     // Return _TriangleIntersection_ for intersection
     return TriangleIntersection{b0, b1, b2, t};
-// #endif
+#endif
 
 }
 
