@@ -96,6 +96,8 @@ BasicSceneBuilder::BasicSceneBuilder(BasicScene *scene)
     accelerator.name = SceneEntity::internedStrings.Lookup("bvh");
     if(Options->WBVH)
         accelerator.name = SceneEntity::internedStrings.Lookup("wbvh");
+    else if(Options->MEBVH)
+        accelerator.name = SceneEntity::internedStrings.Lookup("mebvh");
 
     film.name = SceneEntity::internedStrings.Lookup("rgb");
     film.parameters = ParameterDictionary({}, RGBColorSpace::sRGB);
@@ -1501,7 +1503,13 @@ Primitive BasicScene::CreateAggregate(
 
             // Create single _Primitive_ for _prims_
             if (prims.size() > 1) {
-                Primitive bvh = new BVHAggregate(std::move(prims));
+                Primitive bvh;
+                if(accelerator.name == "wbvh")
+                    bvh = new WBVHAggregate(std::move(prims));
+                // else if(accelerator.name == "mebvh")
+                //     bvh = new MEBVHAggregate(std::move(prims));
+                else
+                    bvh = new BVHAggregate(std::move(prims));
                 prims.clear();
                 prims.push_back(bvh);
             }
@@ -1544,7 +1552,13 @@ Primitive BasicScene::CreateAggregate(
 
         if (instancePrimitives.size() > 1) {
             // create prebuild bvh here for each instance
-            Primitive bvh = new BVHAggregate(std::move(instancePrimitives));
+            Primitive bvh = nullptr;
+            if(accelerator.name == "wbvh")
+                bvh = new WBVHAggregate(std::move(instancePrimitives));
+            // else if(accelerator.name == "mebvh")
+            //     bvh = new MEBVHAggregate(std::move(instancePrimitives));
+            else
+                bvh = new BVHAggregate(std::move(instancePrimitives));
             instancePrimitives.clear();
             instancePrimitives.push_back(bvh);
         }

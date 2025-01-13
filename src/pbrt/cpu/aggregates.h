@@ -82,12 +82,12 @@ class WBVHAggregate {
     pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax) const;
     bool IntersectP(const Ray &ray, Float tMax) const;
 
-    constexpr static std::size_t WIDTH = 8;
+    constexpr static std::size_t WIDTH = 6;
 
 
   private:
     // WBVHAggregate Private Methods
-    WBVHBuildNode *buildRecursive(ThreadLocal<Allocator> &threadAllocators,
+    WBVHBuildNode* buildRecursive(ThreadLocal<Allocator> &threadAllocators,
                                   pstd::span<BVHPrimitive> bvhPrimitives,
                                   std::atomic<int> *totalNodes,
                                   std::atomic<int> *orderedPrimsOffset,
@@ -97,8 +97,42 @@ class WBVHAggregate {
 
     int maxPrimsInNode;
     Bounds3f gbounds;
+
+    std::atomic<int> empty_nodes = 0;
+    std::atomic<int> total_nodes = 0;
+    std::atomic<int> one_nodes = 0;
+
     std::vector<Primitive> primitives;
     LinearWBVHNode *nodes = nullptr;
+};
+
+struct MEBVHBuildNode;
+struct LinearMEBVHNode;
+
+class MEBVHAggregate {
+  public:
+    // WBVHAggregate Public Methods
+    MEBVHAggregate(std::vector<Primitive> p, int maxPrimsInNode = 1);
+    static MEBVHAggregate *Create(std::vector<Primitive> prims, const ParameterDictionary &parameters);
+    Bounds3f Bounds() const;
+    pstd::optional<ShapeIntersection> Intersect(const Ray &ray, Float tMax) const;
+    bool IntersectP(const Ray &ray, Float tMax) const;
+    constexpr static std::size_t WIDTH = 6;
+
+  private:
+    // WBVHAggregate Private Methods
+    MEBVHBuildNode *buildRecursive(ThreadLocal<Allocator> &threadAllocators,
+                                  pstd::span<BVHPrimitive> bvhPrimitives,
+                                  std::atomic<int> *totalNodes,
+                                  std::atomic<int> *orderedPrimsOffset,
+                                  std::vector<Primitive> &orderedPrims,
+                                  int depth = 0);
+    int flattenMEBVH(MEBVHBuildNode *node, int locate, int offset);
+
+    int maxPrimsInNode;
+    Bounds3f gbounds;
+    std::vector<Primitive> primitives;
+    LinearMEBVHNode *nodes = nullptr;
 };
 
 

@@ -56,6 +56,7 @@ struct PBRTOptions : BasicPBRTOptions {
     Float displacementEdgeScale = 1;
 
     bool WBVH = false;
+    bool MEBVH = false;
 
     std::string ToString() const;
 };

@@ -795,8 +795,6 @@ struct WBVHBuildNode {
 
 struct alignas(32) LinearWBVHNode {
 
-    // Bounds3f bounds[WBVHAggregate::WIDTH];
-    // Float AABB[3][2][WBVHAggregate::WIDTH]; // [dims][min/max][0 ~ WIDTH]
     __m256 AABB[3][2];
 
     int      offsets[WBVHAggregate::WIDTH];
@@ -818,6 +816,18 @@ struct alignas(32) LinearWBVHNode {
         AABB[1][1][i] = b.pMax.y;
         AABB[2][0][i] = b.pMin.z;
         AABB[2][1][i] = b.pMax.z;
+    }
+
+    std::array<bool, WBVHAggregate::WIDTH> Intersect(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, Vector3f invDir, const int dirIsNeg[3]) const {
+        std::array<bool, WBVHAggregate::WIDTH> hit;
+        for(int i=0; i<WBVHAggregate::WIDTH; ++i){
+            Bounds3f bounds(
+                Point3f(AABB[0][0][i], AABB[1][0][i], AABB[2][0][i]),
+                Point3f(AABB[0][1][i], AABB[1][1][i], AABB[2][1][i])
+            );
+            hit[i] = bounds.IntersectP(ray_o, ray_d, raytMax, invDir, dirIsNeg);
+        }
+        return hit;
     }
 
     std::array<bool, WBVHAggregate::WIDTH> IntersectSIMD(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, Vector3f invDir, const int dirIsNeg[3]) const {
@@ -904,7 +914,7 @@ WBVHAggregate::WBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode)
     std::atomic<int> totalNodes{0};
 
     std::atomic<int> orderedPrimsOffset{0};
-    LOG_CONCISE("Starting WBVH build with %d primitives", (int)primitives.size());
+    // LOG_CONCISE("Starting WBVH build with %d primitives", (int)primitives.size());
     root = buildRecursive(threadAllocators, pstd::span<BVHPrimitive>(bvhPrimitives),
                             &totalNodes, &orderedPrimsOffset, orderedPrims);
     CHECK_EQ(orderedPrimsOffset.load(), orderedPrims.size());
@@ -916,18 +926,18 @@ WBVHAggregate::WBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode)
     for (const auto &subNode: root->subNodes)
         gbounds = Union(gbounds, subNode.bounds);
 
+    LOG_CONCISE("%d-Wide BVH total_nodes: %d empty_nodes: %d one_nodes: %d", WBVHAggregate::WIDTH, total_nodes.load(), empty_nodes.load(), one_nodes.load());
+
     // Convert BVH into compact representation in _nodes_ array
     bvhPrimitives.resize(0);
     bvhPrimitives.shrink_to_fit();
-    LOG_VERBOSE("WBVH created with %d nodes for %d primitives (%.2f MB)",
+    LOG_CONCISE("WBVH created with %d nodes for %d primitives (%.2f MB)",
                 totalNodes.load(), (int)primitives.size(),
                 float(totalNodes.load() * sizeof(LinearWBVHNode)) / (1024.f * 1024.f));
     treeBytes += totalNodes * sizeof(LinearWBVHNode) + sizeof(*this) +
                  primitives.size() * sizeof(primitives[0]);
     nodes = new LinearWBVHNode[totalNodes];
     int offset = flattenWBVH(root, 0, 1);
-
-    LOG_CONCISE("Linear WBVH size: %d\n", sizeof(LinearWBVHNode));
 
     CHECK_EQ(totalNodes.load(), offset);
 }
@@ -1131,16 +1141,98 @@ WBVHBuildNode *WBVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAlloc
     // octant sort
     node->sort();
 
+    // unsplitable internal node check
+    /*
+    for(int i=0; i<WBVHAggregate::WIDTH; ++i){
+        if(node->subNodes[i].type != WBVHBuildNode::SubNode::INTERNAL)
+            continue;
+
+        auto &target = node->subNodes[i];
+        if(target.bounds.SurfaceArea() == 0 || target.size() == 1)
+            target.type = WBVHBuildNode::SubNode::LEAF;
+        else {
+            int dim = target.centroidBounds.MaxDimension();
+            if(target.centroidBounds.pMax[dim] == target.centroidBounds.pMin[dim])
+                target.type = WBVHBuildNode::SubNode::LEAF;
+            else {
+                int mid = target.mid();
+                if (target.size() <= 2)
+                    target.type = WBVHBuildNode::SubNode::LEAF;
+                else {
+                    constexpr int nBuckets = 12;
+                    BVHSplitBucket buckets[nBuckets];
+
+                    for (const auto &prim : bvhPrimitives.subspan(target.start, target.size())) {
+                        int b = nBuckets * target.centroidBounds.Offset(prim.Centroid())[dim];
+                        if (b == nBuckets)
+                            b = nBuckets - 1;
+                        DCHECK_GE(b, 0);
+                        DCHECK_LT(b, nBuckets);
+                        buckets[b].count++;
+                        buckets[b].bounds = Union(buckets[b].bounds, prim.bounds);
+                    }
+                    // Compute costs for splitting after each bucket
+                    constexpr int nSplits = nBuckets - 1;
+                    Float costs[nSplits] = {};
+                    // Partially initialize _costs_ using a forward scan over splits
+                    int countBelow = 0;
+                    Bounds3f boundBelow;
+                    for (int i = 0; i < nSplits; ++i) {
+                        boundBelow = Union(boundBelow, buckets[i].bounds);
+                        countBelow += buckets[i].count;
+                        costs[i] += countBelow * boundBelow.SurfaceArea();
+                    }
+
+                    // Finish initializing _costs_ using a backward scan over splits
+                    int countAbove = 0;
+                    Bounds3f boundAbove;
+                    for (int i = nSplits; i >= 1; --i) {
+                        boundAbove = Union(boundAbove, buckets[i].bounds);
+                        countAbove += buckets[i].count;
+                        costs[i - 1] += countAbove * boundAbove.SurfaceArea();
+                    }
+
+                    // Find bucket to split at that minimizes SAH metric
+                    int minCostSplitBucket = -1;
+                    Float minCost = Infinity;
+                    for (int i = 0; i < nSplits; ++i) {
+                        // Compute cost for candidate split and update minimum if necessary
+                        if (costs[i] < minCost) {
+                            minCost = costs[i];
+                            minCostSplitBucket = i;
+                        }
+                    }
+                    // Compute leaf cost and SAH split cost for chosen split
+                    Float leafCost = target.size();
+                    minCost = 1.f / 2.f + minCost / target.bounds.SurfaceArea();
+
+                    // Either create leaf or split primitives at selected SAH bucket
+                    if (!(target.size() > maxPrimsInNode || minCost < leafCost)){
+                        target.type = WBVHBuildNode::SubNode::LEAF;
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+    */
+
+    // statistics
+    int empty_cnt = 0;
+    for(int i=0; i<WBVHAggregate::WIDTH; ++i){
+        if(node->subNodes[i].type == WBVHBuildNode::SubNode::EMPTY)
+            empty_cnt++;
+    }
+    this->empty_nodes.fetch_add(empty_cnt);
+    this->total_nodes.fetch_add(1);
+    this->one_nodes.fetch_add(empty_cnt == WBVHAggregate::WIDTH - 1);
+
 
     if(bvhPrimitives.size() > 128 * 1024){
         ParallelFor(0, WBVHAggregate::WIDTH, [&](int i){
             if(node->subNodes[i].type == WBVHBuildNode::SubNode::EMPTY)
-                return;
-            
-            // if(node->subNodes[i].size() <= WBVHAggregate::WIDTH)
-            //     node->subNodes[i].type = WBVHBuildNode::SubNode::LEAF;
-            
-            if(node->subNodes[i].type == WBVHBuildNode::SubNode::INTERNAL){
+                return;            
+            else if(node->subNodes[i].type == WBVHBuildNode::SubNode::INTERNAL){
                 node->subNodes[i].child = buildRecursive(
                     threadAllocators,
                     bvhPrimitives.subspan(node->subNodes[i].start, node->subNodes[i].size()),
@@ -1169,11 +1261,7 @@ WBVHBuildNode *WBVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAlloc
             if(node->subNodes[i].type == WBVHBuildNode::SubNode::EMPTY){
                 continue;
             }
-
-            // if(node->subNodes[i].size() <= WBVHAggregate::WIDTH)
-            //     node->subNodes[i].type = WBVHBuildNode::SubNode::LEAF;
-
-            if(node->subNodes[i].type == WBVHBuildNode::SubNode::INTERNAL){
+            else if(node->subNodes[i].type == WBVHBuildNode::SubNode::INTERNAL){
                 node->subNodes[i].child = buildRecursive(
                     threadAllocators,
                     bvhPrimitives.subspan(node->subNodes[i].start, node->subNodes[i].size()),
@@ -1198,10 +1286,6 @@ WBVHBuildNode *WBVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAlloc
         }
 
     }
-
-
-  
-
     return node;
 }
 
@@ -1245,7 +1329,7 @@ int WBVHAggregate::flattenWBVH(WBVHBuildNode *node, int locate, int offset) {
 pstd::optional<ShapeIntersection> WBVHAggregate::Intersect(const Ray &ray, Float tMax) const {
     if (!nodes)
         return {};
-        
+
     pstd::optional<ShapeIntersection> si;
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
     int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
@@ -1257,7 +1341,8 @@ pstd::optional<ShapeIntersection> WBVHAggregate::Intersect(const Ray &ray, Float
     while (toVisitOffset > 0) {
         ++nodesVisited;
         const LinearWBVHNode *node = &nodes[nodesToVisit[--toVisitOffset]];
-        auto hit = node->IntersectSIMD(ray.o, ray.d, tMax, invDir, dirIsNeg);
+        auto hit = node->Intersect(ray.o, ray.d, tMax, invDir, dirIsNeg);
+        
         for(int octant = 7; octant >= 0; --octant){
             int child = octant ^ rayOctant;
             if(child >= WBVHAggregate::WIDTH)
@@ -1299,7 +1384,7 @@ bool WBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
     while (toVisitOffset > 0) {
         ++nodesVisited;
         const LinearWBVHNode *node = &nodes[nodesToVisit[--toVisitOffset]];
-        auto hit = node->IntersectSIMD(ray.o, ray.d, tMax, invDir, dirIsNeg);
+        auto hit = node->Intersect(ray.o, ray.d, tMax, invDir, dirIsNeg);
 
         for(int child = 0; child < WBVHAggregate::WIDTH; ++child){
             if(child >= WBVHAggregate::WIDTH)
@@ -1328,13 +1413,776 @@ bool WBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
 WBVHAggregate *WBVHAggregate::Create(std::vector<Primitive> prims,
                                    const ParameterDictionary &parameters) {
     int maxPrimsInNode = parameters.GetOneInt("maxnodeprims", 64);
-    LOG_CONCISE("[WBVH Create] maxPrimsInNode: %d", maxPrimsInNode);
+    // LOG_CONCISE("[WBVH Create] maxPrimsInNode: %d", maxPrimsInNode);
     return new WBVHAggregate(std::move(prims), maxPrimsInNode);
 }
 
 Bounds3f WBVHAggregate::Bounds() const {
     return gbounds;
 }
+
+// MEBVH Method Definitions
+
+
+
+// WBVHBuildNode Definition
+struct MEBVHBuildNode {
+    struct SubNode{
+        Bounds3f bounds = Bounds3f();
+        Bounds3f centroidBounds = Bounds3f();
+        MEBVHBuildNode* child = nullptr;
+        uint32_t nPrimitives = 0;
+        uint32_t firstPrimOffset = 0;
+        uint32_t start = 0;
+        uint32_t end = 0;
+        enum {INTERNAL, LEAF, EMPTY} type = EMPTY;
+        uint32_t size() { return end - start; }
+        uint32_t mid() { return (start + end) / 2; }
+    } subNodes[MEBVHAggregate::WIDTH];
+
+    static bool octantCompare(const MEBVHBuildNode::SubNode &a, const MEBVHBuildNode::SubNode &b){
+        auto a_centriod = (a.bounds.pMin + a.bounds.pMax) * 0.5f;
+        auto b_centriod = (b.bounds.pMin + b.bounds.pMax) * 0.5f;
+        return a_centriod.x < b_centriod.x;
+    }
+
+    void sort(){
+        std::sort(subNodes, subNodes + MEBVHAggregate::WIDTH, octantCompare);
+    }
+
+    std::string ToString(){
+        std::string str = "";
+        for(int i=0; i<WBVHAggregate::WIDTH; ++i){
+            str += pbrt::StringPrintf("[%d] nPrimitives: %d, firstPrimOffset: %d, se %d -> %d, bound center: %s\n",
+                i,
+                subNodes[i].nPrimitives,
+                subNodes[i].firstPrimOffset,
+                subNodes[i].start,
+                subNodes[i].end,
+                ((subNodes[i].bounds.pMin + subNodes[i].bounds.pMax) * .5f).ToString()
+            );
+        }
+        return str;
+    }
+
+};
+
+
+struct alignas(64) LinearMEBVHNode{    
+    Float p[3];
+    uint32_t primitive_offset = UINT32_MAX;
+    uint32_t internal_offset : 24;
+    int8_t e[3];
+    uint8_t meta[MEBVHAggregate::WIDTH];
+    uint8_t q[3][2][MEBVHAggregate::WIDTH]; // dim / minmax / width
+
+    void init(MEBVHBuildNode* const node, const Bounds3f &bounds, int offset, int primitive_offset){
+        this->internal_offset = offset;
+        this->primitive_offset = primitive_offset;
+        for(int dim = 0; dim < 3; ++dim){
+            this->p[dim] = bounds.pMin[dim];
+            auto e_i = [](const Float &min, const Float &max){
+                return pstd::ceil(Log2((max - min + 0.00000001f) / 255.0));
+            };
+            int32_t tE = e_i(bounds.pMin[dim], bounds.pMax[dim]);
+            this->e[dim] = std::max(INT8_MIN, std::min(INT8_MAX, tE));
+        }
+
+        int internal_cnt = 0;
+        for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
+            if(node->subNodes[i].type == MEBVHBuildNode::SubNode::INTERNAL){
+                for(int dim = 0; dim < 3; ++dim){
+                    int32_t tQ_lo = pstd::floor((node->subNodes[i].bounds.pMin[dim] - p[dim]) / std::exp2(e[dim]));
+                    int32_t tQ_hi = pstd::ceil((node->subNodes[i].bounds.pMax[dim] - p[dim]) / std::exp2(e[dim]));
+                    // tQ_lo = std::max(0, tQ_lo-1);
+                    // tQ_hi = std::min(255, tQ_hi+1);
+                    CHECK_GE(tQ_lo, 0); CHECK_LE(tQ_lo, 255);
+                    CHECK_GE(tQ_hi, 0); CHECK_LE(tQ_hi, 255);
+                    this->q[dim][0][i] = tQ_lo;
+                    this->q[dim][1][i] = tQ_hi;
+                }
+                CHECK_LT(internal_cnt, 8);
+                meta[i] = 0b11111000 | (internal_cnt++);
+            }
+            else if(node->subNodes[i].type == MEBVHBuildNode::SubNode::LEAF){
+                for(int dim = 0; dim < 3; ++dim){
+                    int32_t tQ_lo = pstd::floor((node->subNodes[i].bounds.pMin[dim] - p[dim]) / std::exp2(e[dim]));
+                    int32_t tQ_hi = pstd::ceil((node->subNodes[i].bounds.pMax[dim] - p[dim]) / std::exp2(e[dim]));
+                    CHECK_GE(tQ_lo, 0); CHECK_LE(tQ_lo, 255);
+                    CHECK_GE(tQ_hi, 0); CHECK_LE(tQ_hi, 255);
+                    this->q[dim][0][i] = tQ_lo;
+                    this->q[dim][1][i] = tQ_hi;
+                }
+                CHECK_LT(node->subNodes[i].nPrimitives, 248);
+                meta[i] = node->subNodes[i].nPrimitives;
+            }
+            else if(node->subNodes[i].type == MEBVHBuildNode::SubNode::EMPTY){
+                meta[i] = 0;
+            }
+        }
+    }
+    Bounds3f bounds(const int &i) const {
+        Bounds3f b;
+        for(int dim = 0; dim < 3; ++dim){
+            b.pMin[dim] = p[dim] + q[dim][0][i] * std::exp2(e[dim]);
+            b.pMax[dim] = p[dim] + q[dim][1][i] * std::exp2(e[dim]);
+        }
+        return b;
+    }
+    int32_t offset(const int &i) const {
+        CHECK(isInternal(i));
+        return internal_offset + (meta[i] & 0b00000111);
+    }
+    int32_t nPrimitives(const int &i) const {
+        CHECK(isLeaf(i));        
+        return meta[i];
+    }
+    inline bool isInternal(const int &i) const {
+        return (meta[i] & 0b11111000) == 0b11111000;
+    }
+    inline bool isLeaf(const int &i) const {
+        return meta[i] < 0b11111000 && meta[i] != 0;
+    }
+    inline bool isEmpty(const int &i) const {
+        return meta[i] == 0;
+    }
+
+    std::array<bool, MEBVHAggregate::WIDTH> Intersect(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, const Vector3f &invDir, const int dirIsNeg[3]) const {
+        std::array<bool, MEBVHAggregate::WIDTH> hit;
+        for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
+            if(isEmpty(i))
+                hit[i] = false;
+            else
+                hit[i] = bounds(i).IntersectP(ray_o, ray_d, raytMax, invDir, dirIsNeg);
+        }
+        return hit;
+    }
+
+    inline float fast_exp2(int8_t e) const {
+        union {
+            uint32_t u;
+            float f;
+        } converter;
+        converter.u = ((e + 127) << 23);
+        return converter.f;
+    }
+
+    #define _mm256_dequant(d, m) _mm256_fmadd_ps(_mm256_set_ps(0, 0, q[d][m][5], q[d][m][4], q[d][m][3], q[d][m][2], q[d][m][1], q[d][m][0]), _mm256_set1_ps(fast_exp2(e[d])), _mm256_set1_ps(p[d]))
+    #define _mm256_submul_ps(a, b, c) _mm256_mul_ps(_mm256_sub_ps(a, b), c)
+
+    std::array<bool, MEBVHAggregate::WIDTH> IntersectSIMD(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, const Vector3f &invDir, const int dirIsNeg[3]) const {
+        __m256 ray_o_xyz = _mm256_set1_ps(ray_o.x);
+        __m256 invDir_xyz = _mm256_set1_ps(invDir.x);
+        __m256 tMin_xyz = _mm256_mul_ps(_mm256_sub_ps(_mm256_dequant(0,  dirIsNeg[0]), ray_o_xyz), invDir_xyz);
+        __m256 tMax_xyz = _mm256_mul_ps(_mm256_sub_ps(_mm256_dequant(0, !dirIsNeg[0]), ray_o_xyz), invDir_xyz);
+
+        ray_o_xyz  = _mm256_set1_ps(ray_o.y);
+        invDir_xyz = _mm256_set1_ps(invDir.y);
+        tMin_xyz = _mm256_max_ps(
+            tMin_xyz,
+            _mm256_submul_ps(_mm256_dequant(1, dirIsNeg[1]), ray_o_xyz, invDir_xyz)
+        );
+        tMax_xyz = _mm256_min_ps(
+            tMax_xyz,
+            _mm256_submul_ps(_mm256_dequant(1, !dirIsNeg[1]), ray_o_xyz, invDir_xyz)
+        );
+
+        ray_o_xyz = _mm256_set1_ps(ray_o.z);
+        invDir_xyz = _mm256_set1_ps(invDir.z);
+        tMin_xyz = _mm256_max_ps(
+            tMin_xyz,
+            _mm256_submul_ps(_mm256_dequant(2, dirIsNeg[2]), ray_o_xyz, invDir_xyz)
+        );
+        tMax_xyz = _mm256_min_ps(
+            tMax_xyz,
+            _mm256_submul_ps(_mm256_dequant(2, !dirIsNeg[2]), ray_o_xyz, invDir_xyz)
+        );
+
+        __m256 t_cmp = _mm256_cmp_ps(tMin_xyz, tMax_xyz, _CMP_LE_OQ);        
+        t_cmp = _mm256_and_ps(t_cmp, _mm256_cmp_ps(tMax_xyz, _mm256_setzero_ps(), _CMP_GT_OQ));
+        t_cmp = _mm256_and_ps(t_cmp, _mm256_cmp_ps(tMin_xyz, _mm256_set1_ps(raytMax), _CMP_LT_OQ));
+        std::array<bool, MEBVHAggregate::WIDTH> hit;
+        for(int i=0; i<MEBVHAggregate::WIDTH; ++i)
+            hit[i] = std::isnan(t_cmp[i]);   
+        return hit;
+    }
+};
+
+
+MEBVHAggregate::MEBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode)
+    : maxPrimsInNode(std::min(247, maxPrimsInNode)),
+      primitives(std::move(prims)) {
+
+    CHECK(!primitives.empty());
+    std::vector<BVHPrimitive> bvhPrimitives(primitives.size());
+    for (size_t i = 0; i < primitives.size(); ++i)
+        bvhPrimitives[i] = BVHPrimitive(i, primitives[i].Bounds());
+
+    pstd::pmr::monotonic_buffer_resource resource;
+    Allocator alloc(&resource);
+    using Resource = pstd::pmr::monotonic_buffer_resource;
+    std::vector<std::unique_ptr<Resource>> threadBufferResources;
+    ThreadLocal<Allocator> threadAllocators([&threadBufferResources]() {
+        threadBufferResources.push_back(std::make_unique<Resource>());
+        auto ptr = threadBufferResources.back().get();
+        return Allocator(ptr);
+    });
+
+    std::vector<Primitive> orderedPrims(primitives.size());
+    MEBVHBuildNode *root;
+    // Build BVH according to selected _splitMethod_
+    std::atomic<int> totalNodes{0};
+    std::atomic<int> orderedPrimsOffset{0};
+    LOG_CONCISE("Starting MEBVH build with %d primitives", (int)primitives.size());
+    root = buildRecursive(threadAllocators, pstd::span<BVHPrimitive>(bvhPrimitives),
+                            &totalNodes, &orderedPrimsOffset, orderedPrims);
+    CHECK_EQ(orderedPrimsOffset.load(), orderedPrims.size());
+    primitives.swap(orderedPrims);
+
+    // construct gbounds
+    gbounds = Bounds3f();
+    for (const auto &subNode: root->subNodes)
+        gbounds = Union(gbounds, subNode.bounds);
+
+    // Convert BVH into compact representation in _nodes_ array
+    bvhPrimitives.resize(0);
+    bvhPrimitives.shrink_to_fit();
+    LOG_VERBOSE("MEBVH created with %d nodes for %d primitives (%.2f MB)",
+                totalNodes.load(), (int)primitives.size(),
+                float(totalNodes.load() * sizeof(LinearMEBVHNode)) / (1024.f * 1024.f));
+    treeBytes += totalNodes * sizeof(LinearMEBVHNode) + sizeof(*this) +
+                 primitives.size() * sizeof(primitives[0]);
+    nodes = new LinearMEBVHNode[totalNodes];
+
+    CHECK(sizeof(LinearMEBVHNode) == 64);
+
+    int offset = flattenMEBVH(root, 0, 1);
+    CHECK_EQ(totalNodes.load(), offset);
+}
+
+MEBVHBuildNode* MEBVHAggregate::buildRecursive(
+    ThreadLocal<Allocator> &threadAllocators,
+    pstd::span<BVHPrimitive> bvhPrimitives,
+    std::atomic<int> *totalNodes,
+    std::atomic<int> *orderedPrimsOffset,
+    std::vector<Primitive> &orderedPrims,
+    int depth){
+
+    DCHECK_NE(bvhPrimitives.size(), 0);
+    CHECK_LE(depth, 30);
+    
+    Allocator alloc = threadAllocators.Get();
+    MEBVHBuildNode *node = alloc.new_object<MEBVHBuildNode>();
+    // Initialize _BVHBuildNode_ for primitive range
+    ++*totalNodes;
+    
+
+    // Initialize the first child
+    node->subNodes[0].start = 0;
+    node->subNodes[0].end = bvhPrimitives.size();
+    node->subNodes[0].type = MEBVHBuildNode::SubNode::INTERNAL;
+
+    for (const auto &prim : bvhPrimitives){
+        node->subNodes[0].bounds = Union(node->subNodes[0].bounds, prim.bounds);
+        node->subNodes[0].centroidBounds = Union(node->subNodes[0].centroidBounds, prim.Centroid());
+    }
+    int builtChildCnt = 1;
+
+    // split until reach the width or not splitable
+    while(builtChildCnt < MEBVHAggregate::WIDTH) {
+        // find the child with the largest bounds
+        int largestChild = -1;
+        Float largestArea = 0;
+        for (int i = 0; i < builtChildCnt; i++) {
+            Float area = node->subNodes[i].bounds.SurfaceArea();
+            if(area <= 0)
+                // prevent internal node with zero area, which leads to infinite recursion
+                node->subNodes[i].type = MEBVHBuildNode::SubNode::LEAF;
+            else if(node->subNodes[i].size() == 0)
+                node->subNodes[i].type = MEBVHBuildNode::SubNode::EMPTY;
+            else if (node->subNodes[i].type == MEBVHBuildNode::SubNode::INTERNAL && area > largestArea){
+                largestArea = node->subNodes[i].bounds.SurfaceArea();
+                largestChild = i;
+            }
+        }
+        if(largestChild == -1)
+            break;
+
+        MEBVHBuildNode::SubNode &target = node->subNodes[largestChild];
+        CHECK(target.size() >= 1);
+        
+        if(target.bounds.SurfaceArea() == 0 || target.size() == 1){
+            // Create leaf _BVHBuildNode_
+            target.type = MEBVHBuildNode::SubNode::LEAF;
+            continue;
+        } else {
+            int dim = target.centroidBounds.MaxDimension();
+            // Partition primitives into two sets and build children
+            if(target.centroidBounds.pMax[dim] == target.centroidBounds.pMin[dim]){
+                // Create leaf _BVHBuildNode_
+                target.type = MEBVHBuildNode::SubNode::LEAF;
+                continue;
+            } else {
+                int mid = target.mid();
+                
+                // Partition primitives using approximate SAH
+                if (target.size() <= 2) {
+                    // Partition primitives into equally sized subsets
+                    mid = target.mid();
+                    std::nth_element(
+                        bvhPrimitives.begin() + target.start,
+                        bvhPrimitives.begin() + mid,
+                        bvhPrimitives.begin() + target.end,
+                        [dim](const BVHPrimitive &a, const BVHPrimitive &b) {
+                            return a.Centroid()[dim] < b.Centroid()[dim];
+                        }
+                    );
+                    
+                    // create a new child
+                    MEBVHBuildNode::SubNode &newChild = node->subNodes[builtChildCnt++];
+                    newChild.start = target.mid();
+                    newChild.end = target.end;
+                    newChild.bounds = Bounds3f();
+                    newChild.centroidBounds = Bounds3f();
+                    newChild.type = MEBVHBuildNode::SubNode::INTERNAL;
+                    for (const auto &prim : bvhPrimitives.subspan(newChild.start, newChild.size())) {
+                        newChild.bounds = Union(newChild.bounds, prim.bounds);
+                        newChild.centroidBounds = Union(newChild.centroidBounds, prim.Centroid());
+                    }
+
+                    // reduce the original child
+                    target.end = target.mid();
+                    target.bounds = Bounds3f();
+                    target.centroidBounds = Bounds3f();
+                    target.type = MEBVHBuildNode::SubNode::INTERNAL;
+                    for (const auto &prim : bvhPrimitives.subspan(target.start, target.size())) {
+                        target.bounds = Union(target.bounds, prim.bounds);
+                        target.centroidBounds = Union(target.centroidBounds, prim.Centroid());
+                    }
+
+                } else {
+                    // Allocate _BVHSplitBucket_ for SAH partition buckets
+                    constexpr int nBuckets = 12;
+                    BVHSplitBucket buckets[nBuckets];
+
+                    // Initialize _BVHSplitBucket_ for SAH partition buckets
+                    for (const auto &prim : bvhPrimitives.subspan(target.start, target.size())) {
+                        int b = nBuckets * target.centroidBounds.Offset(prim.Centroid())[dim];
+                        if (b == nBuckets)
+                            b = nBuckets - 1;
+                        DCHECK_GE(b, 0);
+                        DCHECK_LT(b, nBuckets);
+                        buckets[b].count++;
+                        buckets[b].bounds = Union(buckets[b].bounds, prim.bounds);
+                    }
+                    // Compute costs for splitting after each bucket
+                    constexpr int nSplits = nBuckets - 1;
+                    Float costs[nSplits] = {};
+                    // Partially initialize _costs_ using a forward scan over splits
+                    int countBelow = 0;
+                    Bounds3f boundBelow;
+                    for (int i = 0; i < nSplits; ++i) {
+                        boundBelow = Union(boundBelow, buckets[i].bounds);
+                        countBelow += buckets[i].count;
+                        costs[i] += countBelow * boundBelow.SurfaceArea();
+                    }
+
+                    // Finish initializing _costs_ using a backward scan over splits
+                    int countAbove = 0;
+                    Bounds3f boundAbove;
+                    for (int i = nSplits; i >= 1; --i) {
+                        boundAbove = Union(boundAbove, buckets[i].bounds);
+                        countAbove += buckets[i].count;
+                        costs[i - 1] += countAbove * boundAbove.SurfaceArea();
+                    }
+
+                    // Find bucket to split at that minimizes SAH metric
+                    int minCostSplitBucket = -1;
+                    Float minCost = Infinity;
+                    for (int i = 0; i < nSplits; ++i) {
+                        // Compute cost for candidate split and update minimum if
+                        // necessary
+                        if (costs[i] < minCost) {
+                            minCost = costs[i];
+                            minCostSplitBucket = i;
+                        }
+                    }
+                    // Compute leaf cost and SAH split cost for chosen split
+                    Float leafCost = target.size();
+                    minCost = 1.f / 2.f + minCost / target.bounds.SurfaceArea();
+
+                    // Either create leaf or split primitives at selected SAH bucket
+                    if (target.size() > maxPrimsInNode || minCost < leafCost) {
+                        auto midIter = std::partition(
+                            bvhPrimitives.begin() + target.start, bvhPrimitives.begin() + target.end,
+                            [=](const BVHPrimitive &bp) {
+                                int b =
+                                    nBuckets * target.centroidBounds.Offset(bp.Centroid())[dim];
+                                if (b == nBuckets)
+                                    b = nBuckets - 1;
+                                return b <= minCostSplitBucket;
+                            });
+                        mid = midIter - bvhPrimitives.begin();
+                        
+                        // create a new child
+                        MEBVHBuildNode::SubNode &newChild = node->subNodes[builtChildCnt++];
+                        newChild.start = mid;
+                        newChild.end = target.end;
+                        newChild.bounds = Bounds3f();
+                        newChild.centroidBounds = Bounds3f();
+                        newChild.type = MEBVHBuildNode::SubNode::INTERNAL;
+                        for (const auto &prim : bvhPrimitives.subspan(newChild.start, newChild.size())) {
+                            newChild.bounds = Union(newChild.bounds, prim.bounds);
+                            newChild.centroidBounds = Union(newChild.centroidBounds, prim.Centroid());
+                        }
+
+                        // reduce the original child
+                        target.start = target.start;
+                        target.end = mid;
+                        target.bounds = Bounds3f();
+                        target.centroidBounds = Bounds3f();
+                        target.type = MEBVHBuildNode::SubNode::INTERNAL;
+                        for (const auto &prim : bvhPrimitives.subspan(target.start, target.size())) {
+                            target.bounds = Union(target.bounds, prim.bounds);
+                            target.centroidBounds = Union(target.centroidBounds, prim.Centroid());
+                        }
+                    } 
+                    else {
+                        // create leaf _BVHBuildNode_
+                        target.type = MEBVHBuildNode::SubNode::LEAF;
+                        continue;
+                    }
+                }
+            }
+        }           
+    }
+
+    // octant sort
+    node->sort();
+
+    // unsplitable internal node check
+    /*
+    for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
+        if(node->subNodes[i].type != MEBVHBuildNode::SubNode::INTERNAL)
+            continue;
+
+        auto &target = node->subNodes[i];
+        if(target.bounds.SurfaceArea() == 0 || target.size() == 1)
+            target.type = MEBVHBuildNode::SubNode::LEAF;
+        else {
+            int dim = target.centroidBounds.MaxDimension();
+            if(target.centroidBounds.pMax[dim] == target.centroidBounds.pMin[dim])
+                target.type = MEBVHBuildNode::SubNode::LEAF;
+            else {
+                int mid = target.mid();
+                if (target.size() <= 2)
+                    target.type = MEBVHBuildNode::SubNode::LEAF;
+                else {
+                    constexpr int nBuckets = 12;
+                    BVHSplitBucket buckets[nBuckets];
+
+                    for (const auto &prim : bvhPrimitives.subspan(target.start, target.size())) {
+                        int b = nBuckets * target.centroidBounds.Offset(prim.Centroid())[dim];
+                        if (b == nBuckets)
+                            b = nBuckets - 1;
+                        DCHECK_GE(b, 0);
+                        DCHECK_LT(b, nBuckets);
+                        buckets[b].count++;
+                        buckets[b].bounds = Union(buckets[b].bounds, prim.bounds);
+                    }
+                    // Compute costs for splitting after each bucket
+                    constexpr int nSplits = nBuckets - 1;
+                    Float costs[nSplits] = {};
+                    // Partially initialize _costs_ using a forward scan over splits
+                    int countBelow = 0;
+                    Bounds3f boundBelow;
+                    for (int i = 0; i < nSplits; ++i) {
+                        boundBelow = Union(boundBelow, buckets[i].bounds);
+                        countBelow += buckets[i].count;
+                        costs[i] += countBelow * boundBelow.SurfaceArea();
+                    }
+
+                    // Finish initializing _costs_ using a backward scan over splits
+                    int countAbove = 0;
+                    Bounds3f boundAbove;
+                    for (int i = nSplits; i >= 1; --i) {
+                        boundAbove = Union(boundAbove, buckets[i].bounds);
+                        countAbove += buckets[i].count;
+                        costs[i - 1] += countAbove * boundAbove.SurfaceArea();
+                    }
+
+                    // Find bucket to split at that minimizes SAH metric
+                    int minCostSplitBucket = -1;
+                    Float minCost = Infinity;
+                    for (int i = 0; i < nSplits; ++i) {
+                        // Compute cost for candidate split and update minimum if necessary
+                        if (costs[i] < minCost) {
+                            minCost = costs[i];
+                            minCostSplitBucket = i;
+                        }
+                    }
+                    // Compute leaf cost and SAH split cost for chosen split
+                    Float leafCost = target.size();
+                    minCost = 1.f / 2.f + minCost / target.bounds.SurfaceArea();
+
+                    // Either create leaf or split primitives at selected SAH bucket
+                    if (!(target.size() > maxPrimsInNode || minCost < leafCost)){
+                        target.type = MEBVHBuildNode::SubNode::LEAF;
+                        continue;
+                    }
+                }
+            }
+        }
+    }
+    */
+
+    // arrange for continous primitives 
+    int totalPrims = 0;
+    for(int i = 0; i < MEBVHAggregate::WIDTH; ++i){
+        if(node->subNodes[i].type == MEBVHBuildNode::SubNode::LEAF){
+            node->subNodes[i].child = nullptr;
+            node->subNodes[i].nPrimitives = node->subNodes[i].size();
+            totalPrims += node->subNodes[i].size();
+        }
+    }
+    uint32_t primitive_offset = orderedPrimsOffset->fetch_add(totalPrims);
+
+    // we initialize the leaf node first, to ensure the countious primitive arrangement
+    for(int i = 0; i < MEBVHAggregate::WIDTH; ++i){
+        if(node->subNodes[i].type == MEBVHBuildNode::SubNode::LEAF){
+            node->subNodes[i].firstPrimOffset = primitive_offset;
+            for(int j = 0; j < node->subNodes[i].size(); ++j){
+                int index = bvhPrimitives[node->subNodes[i].start + j].primitiveIndex;
+                orderedPrims[primitive_offset++] = primitives[index];
+            }
+        }
+    }
+
+    if(bvhPrimitives.size() > 128 * 1024){
+        ParallelFor(0, MEBVHAggregate::WIDTH, [&](int i){
+            if(node->subNodes[i].type == MEBVHBuildNode::SubNode::EMPTY)
+                return;            
+            else if(node->subNodes[i].type == MEBVHBuildNode::SubNode::INTERNAL){
+                node->subNodes[i].child = buildRecursive(
+                    threadAllocators,
+                    bvhPrimitives.subspan(node->subNodes[i].start, node->subNodes[i].size()),
+                    totalNodes,
+                    orderedPrimsOffset,
+                    orderedPrims,
+                    depth + 1
+                );
+                node->subNodes[i].nPrimitives = 0;
+                node->subNodes[i].firstPrimOffset = 0;
+            }
+            else if(node->subNodes[i].type == MEBVHBuildNode::SubNode::LEAF)
+                return ; // already handled
+        });    
+    }
+    else{
+
+        for(int i = 0; i < MEBVHAggregate::WIDTH; i++){
+            if(node->subNodes[i].type == MEBVHBuildNode::SubNode::EMPTY)
+                continue;
+            else if(node->subNodes[i].type == MEBVHBuildNode::SubNode::INTERNAL){
+                node->subNodes[i].child = buildRecursive(
+                    threadAllocators,
+                    bvhPrimitives.subspan(node->subNodes[i].start, node->subNodes[i].size()),
+                    totalNodes,
+                    orderedPrimsOffset,
+                    orderedPrims,
+                    depth + 1
+                );
+                node->subNodes[i].nPrimitives = 0;
+                node->subNodes[i].firstPrimOffset = 0;
+            }
+            else if(node->subNodes[i].type == MEBVHBuildNode::SubNode::LEAF)
+                continue; // already handled
+        }
+    }
+    return node;
+}
+
+int MEBVHAggregate::flattenMEBVH(MEBVHBuildNode *node, int locate, int offset){
+    LinearMEBVHNode *linearNode = &nodes[locate];
+
+    // find next_offset
+    // find the full bound and primitive_offset of node
+    int internal_offset = 0;
+    Bounds3f bounds = Bounds3f();
+    int32_t first_primitive_offset = -1;
+    for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
+        if(node->subNodes[i].type == MEBVHBuildNode::SubNode::INTERNAL){
+            bounds = Union(bounds, node->subNodes[i].bounds);
+            internal_offset++;
+        }
+        else if(node->subNodes[i].type == MEBVHBuildNode::SubNode::LEAF){
+            bounds = Union(bounds, node->subNodes[i].bounds);
+            if(first_primitive_offset == -1)
+                first_primitive_offset = node->subNodes[i].firstPrimOffset;
+            else
+                CHECK_GT(node->subNodes[i].firstPrimOffset, first_primitive_offset);
+        }
+    }
+    int next_offset = offset + internal_offset;
+    internal_offset = 0;
+
+    // initialize LinearMEBVHNode linearNode
+    linearNode->init(node, bounds, offset, first_primitive_offset);
+
+    int primitive_offset = linearNode->primitive_offset;
+    for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
+        if(node->subNodes[i].type == MEBVHBuildNode::SubNode::INTERNAL){
+            // ground truth            
+            Bounds3f &orig_bounds = node->subNodes[i].bounds;
+            Bounds3f quan_bounds = linearNode->bounds(i);
+            // for(int dim = 0; dim < 3; ++dim){
+            //     CHECK_GE(orig_bounds.pMin[dim], quan_bounds.pMin[dim]);
+            //     CHECK_LE(orig_bounds.pMax[dim], quan_bounds.pMax[dim]);
+            // }
+        }
+        else if (node->subNodes[i].type == MEBVHBuildNode::SubNode::LEAF){
+
+            Bounds3f &orig_bounds = node->subNodes[i].bounds;
+            Bounds3f quan_bounds = linearNode->bounds(i);
+            // for(int dim = 0; dim < 3; ++dim){
+            //     CHECK_GE(orig_bounds.pMin[dim], quan_bounds.pMin[dim]);
+            //     CHECK_LE(orig_bounds.pMax[dim], quan_bounds.pMax[dim]);
+            // }
+            // CHECK_GT(node->subNodes[i].nPrimitives, 0);
+            // CHECK_EQ(node->subNodes[i].firstPrimOffset, primitive_offset);
+            primitive_offset += linearNode->nPrimitives(i);
+            // CHECK_EQ(node->subNodes[i].nPrimitives, linearNode->nPrimitives(i));
+        }
+        else if(node->subNodes[i].type == MEBVHBuildNode::SubNode::EMPTY){
+            CHECK(linearNode->isEmpty(i));
+        }
+    }
+
+    for(int i = 0; i < MEBVHAggregate::WIDTH; i++){
+        if(node->subNodes[i].type == MEBVHBuildNode::SubNode::INTERNAL){
+            next_offset = flattenMEBVH(node->subNodes[i].child, linearNode->offset(i), next_offset);
+        }
+    }
+
+    return next_offset;
+}
+
+MEBVHAggregate *MEBVHAggregate::Create(std::vector<Primitive> prims,
+                                   const ParameterDictionary &parameters) {
+    int maxPrimsInNode = parameters.GetOneInt("maxnodeprims", 247);
+    return new MEBVHAggregate(std::move(prims), maxPrimsInNode);
+}
+
+Bounds3f MEBVHAggregate::Bounds() const {
+    return gbounds;
+}
+
+pstd::optional<ShapeIntersection> MEBVHAggregate::Intersect(const Ray &ray, Float tMax) const {
+    if (!nodes)
+        return {};
+
+    pstd::optional<ShapeIntersection> si;
+    Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
+    int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
+    uint8_t rayOctant = (uint8_t(invDir.x < 0) << 2) | (uint8_t(invDir.y < 0)  << 1) | (uint8_t(invDir.z < 0));
+    int toVisitOffset = 1;
+    int nodesToVisit[64];
+    int nodesVisited = nodesToVisit[0] = 0;
+    uint32_t primitive_offsets[MEBVHAggregate::WIDTH];
+
+    while (toVisitOffset > 0) {
+        ++nodesVisited;
+        const LinearMEBVHNode *node = &nodes[nodesToVisit[--toVisitOffset]];
+        auto hit = node->IntersectSIMD(ray.o, ray.d, tMax, invDir, dirIsNeg);
+        
+        // decompress primitive_offsets;
+        int current_offset = node->primitive_offset;
+        for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
+            if(node->isLeaf(i)){
+                primitive_offsets[i] = current_offset;
+                current_offset += node->nPrimitives(i);
+            }
+        }
+
+        for(int octant = 7; octant >= 0; --octant){
+            int child = octant ^ rayOctant;
+            if(child >= MEBVHAggregate::WIDTH)
+                continue;
+            else if(hit[child]){
+                if(node->isLeaf(child)){
+                    for(int i=0; i < node->nPrimitives(child); ++i){
+                        pstd::optional<ShapeIntersection> primSi =
+                            primitives[primitive_offsets[child] + i].Intersect(ray, tMax);
+                        if(primSi){
+                            si = primSi;
+                            tMax = si->tHit;
+                        }
+                    }
+                }
+                else if(node->isInternal(child)){
+                    nodesToVisit[toVisitOffset++] = node->offset(child);
+                }
+            }
+        }
+    }
+    bvhNodesVisited += nodesVisited;
+    return si;
+};
+
+bool MEBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
+    if (!nodes)
+        return {};
+
+    Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
+    int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
+    // Follow ray through BVH nodes to find primitive intersections
+
+    int toVisitOffset = 1;
+    int nodesToVisit[64];
+    int nodesVisited = 0;
+    nodesToVisit[0] = 0;
+    uint32_t primitive_offsets[MEBVHAggregate::WIDTH];
+
+
+    while (toVisitOffset > 0) {
+        ++nodesVisited;
+        const LinearMEBVHNode *node = &nodes[nodesToVisit[--toVisitOffset]];
+        auto hit = node->IntersectSIMD(ray.o, ray.d, tMax, invDir, dirIsNeg);
+
+        // decompress primitive_offsets;
+        int current_offset = node->primitive_offset;
+        for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
+            if(node->isLeaf(i)){
+                primitive_offsets[i] = current_offset;
+                current_offset += node->nPrimitives(i);
+            }
+        }
+
+        for(int child = 0; child < MEBVHAggregate::WIDTH; ++child){
+            if(child >= MEBVHAggregate::WIDTH)
+                continue;
+            else if(node->isEmpty(child))
+                continue;
+            else if(hit[child]){
+                if(node->isLeaf(child)){
+                    for(int i=0; i< node->nPrimitives(child); ++i){
+                        if(primitives[primitive_offsets[child] + i].IntersectP(ray, tMax)){
+                            bvhNodesVisited += nodesVisited;
+                            return true;
+                        }
+                    }
+                }
+                else if(node->isInternal(child)){
+                    nodesToVisit[toVisitOffset++] = node->offset(child);
+                }
+            }
+        }
+    }
+    bvhNodesVisited += nodesVisited;
+    return false;
+
+};
+
 
 // KdNodeToVisit Definition
 struct KdNodeToVisit {
@@ -1763,9 +2611,10 @@ Primitive CreateAccelerator(const std::string &name, std::vector<Primitive> prim
         accel = KdTreeAggregate::Create(std::move(prims), parameters);
     else if (name == "wbvh")
         accel = WBVHAggregate::Create(std::move(prims), parameters);
+    else if (name == "mebvh")
+        accel = MEBVHAggregate::Create(std::move(prims), parameters);
     else
         ErrorExit("%s: accelerator type unknown.", name);
-
     if (!accel)
         ErrorExit("%s: unable to create accelerator.", name);
 
