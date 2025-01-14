@@ -108,6 +108,7 @@ class WBVHAggregate {
 
 struct MEBVHBuildNode;
 struct LinearMEBVHNode;
+struct LinearOptimizedMEBVHNode;
 
 class MEBVHAggregate {
   public:
@@ -132,7 +133,7 @@ class MEBVHAggregate {
     int maxPrimsInNode;
     Bounds3f gbounds;
     std::vector<Primitive> primitives;
-    LinearMEBVHNode *nodes = nullptr;
+    LinearOptimizedMEBVHNode *nodes = nullptr;
 };
 
 

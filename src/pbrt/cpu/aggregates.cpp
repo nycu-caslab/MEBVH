@@ -1467,8 +1467,7 @@ struct MEBVHBuildNode {
 
 };
 
-
-struct alignas(64) LinearMEBVHNode{    
+struct alignas(64) LinearMEBVHNode{   
     Float p[3];
     uint32_t primitive_offset = UINT32_MAX;
     uint32_t internal_offset : 24;
@@ -1476,7 +1475,7 @@ struct alignas(64) LinearMEBVHNode{
     uint8_t meta[MEBVHAggregate::WIDTH];
     uint8_t q[3][2][MEBVHAggregate::WIDTH]; // dim / minmax / width
 
-    void init(MEBVHBuildNode* const node, const Bounds3f &bounds, int offset, int primitive_offset){
+    void init(MEBVHBuildNode* const node, const Bounds3f &bounds, const int &offset, const int &primitive_offset){
         this->internal_offset = offset;
         this->primitive_offset = primitive_offset;
         for(int dim = 0; dim < 3; ++dim){
@@ -1529,11 +1528,11 @@ struct alignas(64) LinearMEBVHNode{
         }
         return b;
     }
-    int32_t offset(const int &i) const {
+    uint32_t offset(const int &i) const {
         CHECK(isInternal(i));
         return internal_offset + (meta[i] & 0b00000111);
     }
-    int32_t nPrimitives(const int &i) const {
+    uint32_t nPrimitives(const int &i) const {
         CHECK(isLeaf(i));        
         return meta[i];
     }
@@ -1567,35 +1566,38 @@ struct alignas(64) LinearMEBVHNode{
         return converter.f;
     }
 
-    #define _mm256_dequant(d, m) _mm256_fmadd_ps(_mm256_set_ps(0, 0, q[d][m][5], q[d][m][4], q[d][m][3], q[d][m][2], q[d][m][1], q[d][m][0]), _mm256_set1_ps(fast_exp2(e[d])), _mm256_set1_ps(p[d]))
     #define _mm256_submul_ps(a, b, c) _mm256_mul_ps(_mm256_sub_ps(a, b), c)
+
+    inline __m256 dequant(int d, int m) const {
+        return _mm256_fmadd_ps(_mm256_set_ps(0, 0, q[d][m][5], q[d][m][4], q[d][m][3], q[d][m][2], q[d][m][1], q[d][m][0]), _mm256_set1_ps(fast_exp2(e[d])), _mm256_set1_ps(p[d])); 
+    }
 
     std::array<bool, MEBVHAggregate::WIDTH> IntersectSIMD(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, const Vector3f &invDir, const int dirIsNeg[3]) const {
         __m256 ray_o_xyz = _mm256_set1_ps(ray_o.x);
         __m256 invDir_xyz = _mm256_set1_ps(invDir.x);
-        __m256 tMin_xyz = _mm256_mul_ps(_mm256_sub_ps(_mm256_dequant(0,  dirIsNeg[0]), ray_o_xyz), invDir_xyz);
-        __m256 tMax_xyz = _mm256_mul_ps(_mm256_sub_ps(_mm256_dequant(0, !dirIsNeg[0]), ray_o_xyz), invDir_xyz);
+        __m256 tMin_xyz = _mm256_submul_ps(dequant(0,  dirIsNeg[0]), ray_o_xyz, invDir_xyz);
+        __m256 tMax_xyz = _mm256_submul_ps(dequant(0, !dirIsNeg[0]), ray_o_xyz, invDir_xyz);
 
         ray_o_xyz  = _mm256_set1_ps(ray_o.y);
         invDir_xyz = _mm256_set1_ps(invDir.y);
         tMin_xyz = _mm256_max_ps(
             tMin_xyz,
-            _mm256_submul_ps(_mm256_dequant(1, dirIsNeg[1]), ray_o_xyz, invDir_xyz)
+            _mm256_submul_ps(dequant(1, dirIsNeg[1]), ray_o_xyz, invDir_xyz)
         );
         tMax_xyz = _mm256_min_ps(
             tMax_xyz,
-            _mm256_submul_ps(_mm256_dequant(1, !dirIsNeg[1]), ray_o_xyz, invDir_xyz)
+            _mm256_submul_ps(dequant(1, !dirIsNeg[1]), ray_o_xyz, invDir_xyz)
         );
 
         ray_o_xyz = _mm256_set1_ps(ray_o.z);
         invDir_xyz = _mm256_set1_ps(invDir.z);
         tMin_xyz = _mm256_max_ps(
             tMin_xyz,
-            _mm256_submul_ps(_mm256_dequant(2, dirIsNeg[2]), ray_o_xyz, invDir_xyz)
+            _mm256_submul_ps(dequant(2, dirIsNeg[2]), ray_o_xyz, invDir_xyz)
         );
         tMax_xyz = _mm256_min_ps(
             tMax_xyz,
-            _mm256_submul_ps(_mm256_dequant(2, !dirIsNeg[2]), ray_o_xyz, invDir_xyz)
+            _mm256_submul_ps(dequant(2, !dirIsNeg[2]), ray_o_xyz, invDir_xyz)
         );
 
         __m256 t_cmp = _mm256_cmp_ps(tMin_xyz, tMax_xyz, _CMP_LE_OQ);        
@@ -1606,7 +1608,221 @@ struct alignas(64) LinearMEBVHNode{
             hit[i] = std::isnan(t_cmp[i]);   
         return hit;
     }
+
+
+    std::string ToString(){
+        std::string str = "";
+        str += pbrt::StringPrintf("p: 0x%08x 0x%08x 0x%08x\n", *((uint32_t *)(&p[0])), *((uint32_t *)(&p[1])), *((uint32_t *)(&p[2])));
+        str += pbrt::StringPrintf("e: %hhx %hhx %hhx\n", *((uint8_t *)(&e[0])), *((uint8_t *)(&e[1])), *((uint8_t *)(&e[2])));
+        uint32_t tmp_intermal_offset = internal_offset;
+        str += pbrt::StringPrintf("internal_offset: 0x%08x\n", tmp_intermal_offset);
+        str += pbrt::StringPrintf("primitive_offset: 0x%08x\n", primitive_offset);
+        for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
+            str += pbrt::StringPrintf("meta[%d]: %hhx\n", i, meta[i]);
+            for(int dim=0; dim<3; ++dim){
+                str += pbrt::StringPrintf("q[%d][0][%d]: %hhx\n", dim, i, q[dim][0][i]);
+                str += pbrt::StringPrintf("q[%d][1][%d]: %hhx\n", dim, i, q[dim][1][i]);
+            }
+        }
+        return str;
+    }
 };
+
+
+
+static const __m256i m256_0xFF = _mm256_set1_epi32(0xFF);
+
+struct alignas(64) LinearOptimizedMEBVHNode{
+    alignas(64) union {
+        __m256i  m256i;
+        uint32_t u32[8];
+        float    f32[8];
+        int8_t   i8[32];
+        uint8_t  u8[32];
+        // b256[0]
+        // 24B | qmin[0].x qmin[0].y qmin[0].z meta[0] | ... | qmax[5].x qmax[5].y qmax[5].z meta[5] |
+        // 8B  | p[0] | p[1] |  
+
+        // b256[1]
+        // 12B | qmax[0].x qmax[0].y qmax[0].z e[0] | ... | qmax[2].x qmax[2].y qmax[2].z e[2] |
+        // 12B | qmax[3].x qmax[3].y qmax[3].z internal_offset | ... | qmax[5].x qmax[5].y qmax[5].z internal_offset | 
+        // 4B  | p[2] |
+        // 4B  | primitive_offset |
+    } b256[2];
+    
+    void init(MEBVHBuildNode* const node, const Bounds3f &bounds, const int &offset, const int &primitive_offset){
+        LinearMEBVHNode unlignedNode;
+        unlignedNode.init(node, bounds, offset, primitive_offset);
+        b256[0].m256i = _mm256_setzero_si256();
+        b256[1].m256i = _mm256_setzero_si256();
+        for(int i=0; i<6; ++i)
+            b256[0].u32[i] = (unlignedNode.q[0][0][i] << 24) | (unlignedNode.q[1][0][i] << 16) | (unlignedNode.q[2][0][i] << 8) | unlignedNode.meta[i];
+        b256[0].f32[6] = unlignedNode.p[0];
+        b256[0].f32[7] = unlignedNode.p[1];
+
+        alignas(4) union {
+            uint32_t u32;
+            uint8_t  u8[4];
+        } internal;
+        internal.u32 = unlignedNode.internal_offset;
+        CHECK(internal.u8[3] == 0);
+
+        for(int i=0; i<6; ++i)
+            b256[1].u32[i] = (unlignedNode.q[0][1][i] << 24) | (unlignedNode.q[1][1][i] << 16) | (unlignedNode.q[2][1][i] << 8);
+        for(int i=0; i<3; ++i){
+            b256[1].i8[i * 4] = unlignedNode.e[i];
+            b256[1].u8[12 + i * 4] = internal.u8[i];
+        }        
+        b256[1].f32[6] = unlignedNode.p[2];
+        b256[1].u32[7] = unlignedNode.primitive_offset;
+        
+        // TODO:: remove after success
+        // check(unlignedNode);
+    }
+
+    void check(const LinearMEBVHNode &unlignedNode) const {
+        // check p
+        CHECK(unlignedNode.p[0] == p(0));
+        CHECK(unlignedNode.p[1] == p(1));
+        CHECK(unlignedNode.p[2] == p(2));
+
+        // check q, e
+        for(int d = 0; d < 3; ++d){
+            __m256 gt_qmin = _mm256_set_ps(0, 0, unlignedNode.q[d][0][5], unlignedNode.q[d][0][4], unlignedNode.q[d][0][3], unlignedNode.q[d][0][2], unlignedNode.q[d][0][1], unlignedNode.q[d][0][0]);
+            __m256 gt_qmax = _mm256_set_ps(0, 0, unlignedNode.q[d][1][5], unlignedNode.q[d][1][4], unlignedNode.q[d][1][3], unlignedNode.q[d][1][2], unlignedNode.q[d][1][1], unlignedNode.q[d][1][0]);
+            __m256 gt_e = _mm256_set1_ps(unlignedNode.fast_exp2(unlignedNode.e[d]));
+            __m256 tt_qmin = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(b256[0].m256i, 24 - 8 * d), _mm256_set1_epi32(0xFF)));
+            __m256 tt_qmax = _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(b256[1].m256i, 24 - 8 * d), _mm256_set1_epi32(0xFF)));
+            __m256 tt_e = _mm256_set1_ps(unlignedNode.fast_exp2(e(d)));
+
+            for(int i=0; i<6; ++i){
+                CHECK_EQ(gt_qmin[i], tt_qmin[i]);
+                CHECK_EQ(gt_qmax[i], tt_qmax[i]);
+                CHECK_EQ(gt_e[i], tt_e[i]);
+            }
+
+            // check dequant
+            // for(int m = 0; m < 2; ++m){
+            //     __m256 gt_dequant = unlignedNode.dequant(d, m);
+            //     __m256 tt_dequant = dequant(d, m);
+            //     for(int i=0; i<6; ++i)
+            //         CHECK_EQ(gt_dequant[i], tt_dequant[i]);
+            // }
+        }
+        // check meta
+        for(int i=0; i<6; ++i)
+            CHECK_EQ(unlignedNode.meta[i], meta(i));
+        // check internal_offset
+        CHECK_EQ(unlignedNode.internal_offset, internal_offset());
+        // check primitive_offset
+        CHECK_EQ(unlignedNode.primitive_offset, this->primitive_offset());
+
+        // check leaf int attributes
+        for(int i=0; i<6; ++i){
+            if(unlignedNode.isInternal(i))
+                CHECK_EQ(unlignedNode.offset(i), offset(i));
+            else if(unlignedNode.isLeaf(i))
+                CHECK_EQ(unlignedNode.nPrimitives(i), nPrimitives(i));
+        }
+    }
+
+    Bounds3f bounds(const int &i) const {
+        Bounds3f b;
+        for(int dim = 0; dim < 3; ++dim){
+            b.pMin[dim] = p(dim) + (b256[0].u32[i] >> (24 - 8 * dim)) * fast_exp2(e(dim));
+            b.pMax[dim] = p(dim) + (b256[0].u32[i] >> (24 - 8 * dim)) * fast_exp2(e(dim));
+        }
+        return b;
+    }
+
+    inline uint32_t internal_offset() const {
+        return (uint32_t)b256[1].u8[12] << 0 | (uint32_t)b256[1].u8[16] << 8 | (uint32_t)b256[1].u8[20] << 16;
+    }
+    inline uint32_t primitive_offset() const {
+        return b256[1].u32[7];
+    }
+    inline int32_t offset(const int &i) const {
+        CHECK(isInternal(i));
+        return internal_offset() + (meta(i) & 0b00000111);
+    }
+    inline int32_t nPrimitives(const int &i) const {
+        CHECK(isLeaf(i));        
+        return meta(i);
+    }
+    inline uint8_t meta(const int &i) const {
+        return b256[0].u8[4*i];
+    }
+    inline bool isInternal(const int &i) const {
+        return (meta(i) & 0b11111000) == 0b11111000;
+    }
+    inline bool isLeaf(const int &i) const {
+        return meta(i) < 0b11111000 && meta(i) != 0;
+    }
+    inline bool isEmpty(const int &i) const {
+        return meta(i) == 0;
+    }
+    inline float fast_exp2(int8_t e) const {
+        union {
+            uint32_t u;
+            float f;
+        } converter;
+        converter.u = ((e + 127) << 23);
+        return converter.f;
+    }
+    inline float p(const int &i) const {
+        return (i == 2)? b256[1].f32[6]: b256[0].f32[6+i];
+    }
+    inline int8_t e(const int &i) const {
+        return b256[1].i8[i * 4];
+    }   
+    
+    #define extract_dequant(d, m) \
+        _mm256_fmadd_ps(                                                                                        \
+                _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(b256[m].m256i, 24 - 8 * d), m256_0xFF)),  \
+                _mm256_set1_ps(fast_exp2(e(d))),                                                                \
+                _mm256_set1_ps(p(d))                                                                            \
+        )                                                                            
+
+    std::array<bool, MEBVHAggregate::WIDTH> IntersectSIMD(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, const Vector3f &invDir, const int dirIsNeg[3]) const {
+        __m256 ray_o_xyz = _mm256_set1_ps(ray_o.x);
+        __m256 invDir_xyz = _mm256_set1_ps(invDir.x);
+        
+        __m256 tMin_xyz = _mm256_submul_ps(extract_dequant(0,  dirIsNeg[0]), ray_o_xyz, invDir_xyz);
+        __m256 tMax_xyz = _mm256_submul_ps(extract_dequant(0, !dirIsNeg[0]), ray_o_xyz, invDir_xyz);
+
+        ray_o_xyz  = _mm256_set1_ps(ray_o.y);
+        invDir_xyz = _mm256_set1_ps(invDir.y);
+        tMin_xyz = _mm256_max_ps(
+            tMin_xyz,
+            _mm256_submul_ps(extract_dequant(1,  dirIsNeg[1]), ray_o_xyz, invDir_xyz)
+        );
+        tMax_xyz = _mm256_min_ps(
+            tMax_xyz,
+            _mm256_submul_ps(extract_dequant(1, !dirIsNeg[1]), ray_o_xyz, invDir_xyz)
+        );
+        ray_o_xyz = _mm256_set1_ps(ray_o.z);
+        invDir_xyz = _mm256_set1_ps(invDir.z);
+        tMin_xyz = _mm256_max_ps(
+            tMin_xyz,
+            _mm256_submul_ps(extract_dequant(2,  dirIsNeg[2]), ray_o_xyz, invDir_xyz)
+        );
+        tMax_xyz = _mm256_min_ps(
+            tMax_xyz,
+            _mm256_submul_ps(extract_dequant(2, !dirIsNeg[2]), ray_o_xyz, invDir_xyz)
+        );
+
+        __m256 t_cmp = _mm256_cmp_ps(tMin_xyz, tMax_xyz, _CMP_LE_OQ);        
+        t_cmp = _mm256_and_ps(t_cmp, _mm256_cmp_ps(tMax_xyz, _mm256_setzero_ps(), _CMP_GT_OQ));
+        t_cmp = _mm256_and_ps(t_cmp, _mm256_cmp_ps(tMin_xyz, _mm256_set1_ps(raytMax), _CMP_LT_OQ));
+        std::array<bool, MEBVHAggregate::WIDTH> hit;
+        for(int i=0; i<MEBVHAggregate::WIDTH; ++i)
+            hit[i] = std::isnan(t_cmp[i]);   
+        return hit;
+    }
+    
+};
+
+
 
 
 MEBVHAggregate::MEBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode)
@@ -1649,12 +1865,12 @@ MEBVHAggregate::MEBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode)
     bvhPrimitives.shrink_to_fit();
     LOG_VERBOSE("MEBVH created with %d nodes for %d primitives (%.2f MB)",
                 totalNodes.load(), (int)primitives.size(),
-                float(totalNodes.load() * sizeof(LinearMEBVHNode)) / (1024.f * 1024.f));
-    treeBytes += totalNodes * sizeof(LinearMEBVHNode) + sizeof(*this) +
+                float(totalNodes.load() * sizeof(LinearOptimizedMEBVHNode)) / (1024.f * 1024.f));
+    treeBytes += totalNodes * sizeof(LinearOptimizedMEBVHNode) + sizeof(*this) +
                  primitives.size() * sizeof(primitives[0]);
-    nodes = new LinearMEBVHNode[totalNodes];
+    nodes = new LinearOptimizedMEBVHNode[totalNodes];
 
-    CHECK(sizeof(LinearMEBVHNode) == 64);
+    CHECK(sizeof(LinearOptimizedMEBVHNode) == 64);
 
     int offset = flattenMEBVH(root, 0, 1);
     CHECK_EQ(totalNodes.load(), offset);
@@ -2003,7 +2219,7 @@ MEBVHBuildNode* MEBVHAggregate::buildRecursive(
 }
 
 int MEBVHAggregate::flattenMEBVH(MEBVHBuildNode *node, int locate, int offset){
-    LinearMEBVHNode *linearNode = &nodes[locate];
+    LinearOptimizedMEBVHNode *linearNode = &nodes[locate];
 
     // find next_offset
     // find the full bound and primitive_offset of node
@@ -2028,13 +2244,15 @@ int MEBVHAggregate::flattenMEBVH(MEBVHBuildNode *node, int locate, int offset){
 
     // initialize LinearMEBVHNode linearNode
     linearNode->init(node, bounds, offset, first_primitive_offset);
+    // LinearOptimizedMEBVHNode optimizedNode;
+    // optimizedNode.init(node, bounds, offset, first_primitive_offset);
 
-    int primitive_offset = linearNode->primitive_offset;
+    int primitive_offset = linearNode->primitive_offset();
     for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
         if(node->subNodes[i].type == MEBVHBuildNode::SubNode::INTERNAL){
             // ground truth            
-            Bounds3f &orig_bounds = node->subNodes[i].bounds;
-            Bounds3f quan_bounds = linearNode->bounds(i);
+            // Bounds3f &orig_bounds = node->subNodes[i].bounds;
+            // Bounds3f quan_bounds = linearNode->bounds(i);
             // for(int dim = 0; dim < 3; ++dim){
             //     CHECK_GE(orig_bounds.pMin[dim], quan_bounds.pMin[dim]);
             //     CHECK_LE(orig_bounds.pMax[dim], quan_bounds.pMax[dim]);
@@ -2042,8 +2260,8 @@ int MEBVHAggregate::flattenMEBVH(MEBVHBuildNode *node, int locate, int offset){
         }
         else if (node->subNodes[i].type == MEBVHBuildNode::SubNode::LEAF){
 
-            Bounds3f &orig_bounds = node->subNodes[i].bounds;
-            Bounds3f quan_bounds = linearNode->bounds(i);
+            // Bounds3f &orig_bounds = node->subNodes[i].bounds;
+            // Bounds3f quan_bounds = linearNode->bounds(i);
             // for(int dim = 0; dim < 3; ++dim){
             //     CHECK_GE(orig_bounds.pMin[dim], quan_bounds.pMin[dim]);
             //     CHECK_LE(orig_bounds.pMax[dim], quan_bounds.pMax[dim]);
@@ -2051,7 +2269,8 @@ int MEBVHAggregate::flattenMEBVH(MEBVHBuildNode *node, int locate, int offset){
             // CHECK_GT(node->subNodes[i].nPrimitives, 0);
             // CHECK_EQ(node->subNodes[i].firstPrimOffset, primitive_offset);
             primitive_offset += linearNode->nPrimitives(i);
-            // CHECK_EQ(node->subNodes[i].nPrimitives, linearNode->nPrimitives(i));
+            CHECK_EQ(node->subNodes[i].nPrimitives, linearNode->nPrimitives(i));
+
         }
         else if(node->subNodes[i].type == MEBVHBuildNode::SubNode::EMPTY){
             CHECK(linearNode->isEmpty(i));
@@ -2092,11 +2311,11 @@ pstd::optional<ShapeIntersection> MEBVHAggregate::Intersect(const Ray &ray, Floa
 
     while (toVisitOffset > 0) {
         ++nodesVisited;
-        const LinearMEBVHNode *node = &nodes[nodesToVisit[--toVisitOffset]];
+        const LinearOptimizedMEBVHNode *node = &nodes[nodesToVisit[--toVisitOffset]];
         auto hit = node->IntersectSIMD(ray.o, ray.d, tMax, invDir, dirIsNeg);
         
         // decompress primitive_offsets;
-        int current_offset = node->primitive_offset;
+        int current_offset = node->primitive_offset();
         for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
             if(node->isLeaf(i)){
                 primitive_offsets[i] = current_offset;
@@ -2146,11 +2365,11 @@ bool MEBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
 
     while (toVisitOffset > 0) {
         ++nodesVisited;
-        const LinearMEBVHNode *node = &nodes[nodesToVisit[--toVisitOffset]];
+        const LinearOptimizedMEBVHNode *node = &nodes[nodesToVisit[--toVisitOffset]];
         auto hit = node->IntersectSIMD(ray.o, ray.d, tMax, invDir, dirIsNeg);
 
         // decompress primitive_offsets;
-        int current_offset = node->primitive_offset;
+        int current_offset = node->primitive_offset();
         for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
             if(node->isLeaf(i)){
                 primitive_offsets[i] = current_offset;
