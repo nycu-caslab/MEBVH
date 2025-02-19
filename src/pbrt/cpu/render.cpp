@@ -157,6 +157,8 @@ void RenderCPU(BasicScene &parsedScene) {
 
     // Render!
     integrator->Render();
+    printf("\nIntersect time: %f\n", Options->intersect_time.count());
+    printf("\nIntersectP time: %f\n", Options->intersectP_time.count());
 
     LOG_VERBOSE("Memory used after rendering: %s", GetCurrentRSS());
 

@@ -13,6 +13,7 @@
 #include <atomic>
 #include <memory>
 #include <vector>
+#include <pbrt/options.h>
 
 namespace pbrt {
 
@@ -112,7 +113,7 @@ struct LinearOptimizedMEBVHNode;
 
 class MEBVHAggregate {
   public:
-    // WBVHAggregate Public Methods
+    // MEBVHAggregate Public Methods
     MEBVHAggregate(std::vector<Primitive> p, int maxPrimsInNode = 1);
     static MEBVHAggregate *Create(std::vector<Primitive> prims, const ParameterDictionary &parameters);
     Bounds3f Bounds() const;
@@ -121,7 +122,7 @@ class MEBVHAggregate {
     constexpr static std::size_t WIDTH = 6;
 
   private:
-    // WBVHAggregate Private Methods
+    // MEBVHAggregate Private Methods
     MEBVHBuildNode *buildRecursive(ThreadLocal<Allocator> &threadAllocators,
                                   pstd::span<BVHPrimitive> bvhPrimitives,
                                   std::atomic<int> *totalNodes,

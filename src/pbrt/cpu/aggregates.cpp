@@ -532,9 +532,11 @@ Bounds3f BVHAggregate::Bounds() const {
 
 pstd::optional<ShapeIntersection> BVHAggregate::Intersect(const Ray &ray,
                                                           Float tMax) const {
+
     if (!nodes)
         return {};
-    pstd::optional<ShapeIntersection> si;
+
+    pstd::optional<ShapeIntersection> si = {};
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
     int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
     // Follow ray through BVH nodes to find primitive intersections
@@ -578,7 +580,6 @@ pstd::optional<ShapeIntersection> BVHAggregate::Intersect(const Ray &ray,
             currentNodeIndex = nodesToVisit[--toVisitOffset];
         }
     }
-
     bvhNodesVisited += nodesVisited;
     return si;
 }
@@ -1329,6 +1330,8 @@ int WBVHAggregate::flattenWBVH(WBVHBuildNode *node, int locate, int offset) {
 pstd::optional<ShapeIntersection> WBVHAggregate::Intersect(const Ray &ray, Float tMax) const {
     if (!nodes)
         return {};
+    auto start = std::chrono::high_resolution_clock::now();
+
 
     pstd::optional<ShapeIntersection> si;
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
@@ -1365,12 +1368,15 @@ pstd::optional<ShapeIntersection> WBVHAggregate::Intersect(const Ray &ray, Float
         }
     }
     bvhNodesVisited += nodesVisited;
+    Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
     return si;
 }
 
 bool WBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
     if (!nodes)
         return {};
+
+    auto start = std::chrono::high_resolution_clock::now();
 
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
     int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
@@ -1396,6 +1402,7 @@ bool WBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
                     for(int i=0; i< node->nPrimitives[child]; ++i){
                         if(primitives[node->offsets[child] + i].IntersectP(ray, tMax)){
                             bvhNodesVisited += nodesVisited;
+                            Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
                             return true;
                         }
                     }
@@ -1407,6 +1414,7 @@ bool WBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
         }
     }
     bvhNodesVisited += nodesVisited;
+    Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
     return false;
 }
 
@@ -1574,7 +1582,7 @@ struct alignas(64) LinearMEBVHNode{
 
     std::array<bool, MEBVHAggregate::WIDTH> IntersectSIMD(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, const Vector3f &invDir, const int dirIsNeg[3]) const {
         __m256 ray_o_xyz = _mm256_set1_ps(ray_o.x);
-        __m256 invDir_xyz = _mm256_set1_ps(invDir.x);
+        __m256 invDir_xyz = _mm256_set1_ps(invDir.x);                                                                     
         __m256 tMin_xyz = _mm256_submul_ps(dequant(0,  dirIsNeg[0]), ray_o_xyz, invDir_xyz);
         __m256 tMax_xyz = _mm256_submul_ps(dequant(0, !dirIsNeg[0]), ray_o_xyz, invDir_xyz);
 
@@ -1730,7 +1738,7 @@ struct alignas(64) LinearOptimizedMEBVHNode{
         Bounds3f b;
         for(int dim = 0; dim < 3; ++dim){
             b.pMin[dim] = p(dim) + (b256[0].u32[i] >> (24 - 8 * dim)) * fast_exp2(e(dim));
-            b.pMax[dim] = p(dim) + (b256[0].u32[i] >> (24 - 8 * dim)) * fast_exp2(e(dim));
+            b.pMax[dim] = p(dim) + (b256[1].u32[i] >> (24 - 8 * dim)) * fast_exp2(e(dim));
         }
         return b;
     }
@@ -1742,11 +1750,11 @@ struct alignas(64) LinearOptimizedMEBVHNode{
         return b256[1].u32[7];
     }
     inline int32_t offset(const int &i) const {
-        CHECK(isInternal(i));
+        // CHECK(isInternal(i));
         return internal_offset() + (meta(i) & 0b00000111);
     }
     inline int32_t nPrimitives(const int &i) const {
-        CHECK(isLeaf(i));        
+        // CHECK(isLeaf(i));        
         return meta(i);
     }
     inline uint8_t meta(const int &i) const {
@@ -1776,39 +1784,44 @@ struct alignas(64) LinearOptimizedMEBVHNode{
         return b256[1].i8[i * 4];
     }   
     
-    #define extract_dequant(d, m) \
-        _mm256_fmadd_ps(                                                                                        \
+    #define dequant_compute_t(d, m, e256, p_o256, invDir256)                                                      \
+        _mm256_mul_ps(                                                                                          \
+            _mm256_fmadd_ps(                                                                                    \
                 _mm256_cvtepi32_ps(_mm256_and_si256(_mm256_srli_epi32(b256[m].m256i, 24 - 8 * d), m256_0xFF)),  \
-                _mm256_set1_ps(fast_exp2(e(d))),                                                                \
-                _mm256_set1_ps(p(d))                                                                            \
-        )                                                                            
+                e256,                                                                                           \
+                p_o256                                                                                          \
+            ),                                                                                                  \
+            invDir256                                                                                           \
+        )
 
     std::array<bool, MEBVHAggregate::WIDTH> IntersectSIMD(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, const Vector3f &invDir, const int dirIsNeg[3]) const {
-        __m256 ray_o_xyz = _mm256_set1_ps(ray_o.x);
+        __m256 p_minus_o = _mm256_set1_ps(p(0) - ray_o.x);
         __m256 invDir_xyz = _mm256_set1_ps(invDir.x);
-        
-        __m256 tMin_xyz = _mm256_submul_ps(extract_dequant(0,  dirIsNeg[0]), ray_o_xyz, invDir_xyz);
-        __m256 tMax_xyz = _mm256_submul_ps(extract_dequant(0, !dirIsNeg[0]), ray_o_xyz, invDir_xyz);
+        __m256 e256 = _mm256_set1_ps(fast_exp2(e(0)));
+        __m256 tMin_xyz = dequant_compute_t(0,  dirIsNeg[0], e256, p_minus_o, invDir_xyz);
+        __m256 tMax_xyz = dequant_compute_t(0, !dirIsNeg[0], e256, p_minus_o, invDir_xyz);
 
-        ray_o_xyz  = _mm256_set1_ps(ray_o.y);
+        p_minus_o  = _mm256_set1_ps(p(1) - ray_o.y);
         invDir_xyz = _mm256_set1_ps(invDir.y);
+        e256 = _mm256_set1_ps(fast_exp2(e(1)));
         tMin_xyz = _mm256_max_ps(
             tMin_xyz,
-            _mm256_submul_ps(extract_dequant(1,  dirIsNeg[1]), ray_o_xyz, invDir_xyz)
+            dequant_compute_t(1,  dirIsNeg[1], e256, p_minus_o, invDir_xyz)
         );
         tMax_xyz = _mm256_min_ps(
             tMax_xyz,
-            _mm256_submul_ps(extract_dequant(1, !dirIsNeg[1]), ray_o_xyz, invDir_xyz)
+            dequant_compute_t(1, !dirIsNeg[1], e256, p_minus_o, invDir_xyz)
         );
-        ray_o_xyz = _mm256_set1_ps(ray_o.z);
+        p_minus_o = _mm256_set1_ps(p(2) - ray_o.z);
         invDir_xyz = _mm256_set1_ps(invDir.z);
+        e256 = _mm256_set1_ps(fast_exp2(e(2)));
         tMin_xyz = _mm256_max_ps(
             tMin_xyz,
-            _mm256_submul_ps(extract_dequant(2,  dirIsNeg[2]), ray_o_xyz, invDir_xyz)
+            dequant_compute_t(2,  dirIsNeg[2], e256, p_minus_o, invDir_xyz)
         );
         tMax_xyz = _mm256_min_ps(
             tMax_xyz,
-            _mm256_submul_ps(extract_dequant(2, !dirIsNeg[2]), ray_o_xyz, invDir_xyz)
+            dequant_compute_t(2, !dirIsNeg[2], e256, p_minus_o, invDir_xyz)
         );
 
         __m256 t_cmp = _mm256_cmp_ps(tMin_xyz, tMax_xyz, _CMP_LE_OQ);        
@@ -2300,6 +2313,8 @@ pstd::optional<ShapeIntersection> MEBVHAggregate::Intersect(const Ray &ray, Floa
     if (!nodes)
         return {};
 
+    auto start = std::chrono::high_resolution_clock::now();
+
     pstd::optional<ShapeIntersection> si;
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
     int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
@@ -2345,12 +2360,18 @@ pstd::optional<ShapeIntersection> MEBVHAggregate::Intersect(const Ray &ray, Floa
         }
     }
     bvhNodesVisited += nodesVisited;
+
+    Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
     return si;
 };
 
 bool MEBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
+    
     if (!nodes)
         return {};
+
+    auto start = std::chrono::high_resolution_clock::now();
+
 
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
     int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
@@ -2387,6 +2408,7 @@ bool MEBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
                     for(int i=0; i< node->nPrimitives(child); ++i){
                         if(primitives[primitive_offsets[child] + i].IntersectP(ray, tMax)){
                             bvhNodesVisited += nodesVisited;
+                            Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
                             return true;
                         }
                     }
@@ -2398,6 +2420,7 @@ bool MEBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
         }
     }
     bvhNodesVisited += nodesVisited;
+    Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
     return false;
 
 };

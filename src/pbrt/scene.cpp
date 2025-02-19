@@ -1602,32 +1602,6 @@ Primitive BasicScene::CreateAggregate(
     instances.shrink_to_fit();
     LOG_VERBOSE("Finished instances");
 
-    // test
-    size_t SPs = 0;
-    size_t GPs = 0;
-    size_t TPs = 0;
-    size_t APs = 0;
-    size_t BAs = 0;
-    size_t KAs = 0;
-    size_t VAs = 0;
-
-    for(Primitive &prim: primitives){
-        SPs += (nullptr != prim.CastOrNullptr<SimplePrimitive>());
-        GPs += (nullptr != prim.CastOrNullptr<GeometricPrimitive>());
-        TPs += (nullptr != prim.CastOrNullptr<TransformedPrimitive>());
-        APs += (nullptr != prim.CastOrNullptr<AnimatedPrimitive>());
-        BAs += (nullptr != prim.CastOrNullptr<BVHAggregate>());
-        KAs += (nullptr != prim.CastOrNullptr<KdTreeAggregate>());
-    }
-    LOG_CONCISE("SimplePrimitive      : %lu", SPs);
-    LOG_CONCISE("GeometricPrimitive   : %lu", GPs);
-    LOG_CONCISE("TransformedPrimitive : %lu", TPs);
-    LOG_CONCISE("AnimatedPrimitive    : %lu", APs);
-    LOG_CONCISE("BVHAggregate         : %lu", BAs);
-    LOG_CONCISE("KdTreeAggregate      : %lu", KAs);
-
-
-
     // Accelerator
     Primitive aggregate = nullptr;
     LOG_VERBOSE("Starting top-level accelerator");
@@ -1635,6 +1609,7 @@ Primitive BasicScene::CreateAggregate(
         aggregate = CreateAccelerator(accelerator.name, std::move(primitives),
                                       accelerator.parameters);
     LOG_VERBOSE("Finished top-level accelerator");
+
     return aggregate;
 }
 

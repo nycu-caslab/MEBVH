@@ -12,6 +12,7 @@
 
 #include <string>
 
+#include <chrono>
 namespace pbrt {
 
 // RenderingCoordinateSystem Definition
@@ -57,6 +58,9 @@ struct PBRTOptions : BasicPBRTOptions {
 
     bool WBVH = false;
     bool MEBVH = false;
+    std::chrono::duration<double> intersect_time = std::chrono::duration<double>::zero();
+    std::chrono::duration<double> intersectP_time = std::chrono::duration<double>::zero();
+
 
     std::string ToString() const;
 };
