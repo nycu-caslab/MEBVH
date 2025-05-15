@@ -44,90 +44,92 @@ void RenderCPU(BasicScene &parsedScene) {
     parsedScene.CreateMaterials(textures, &namedMaterials, &materials);
     LOG_VERBOSE("Finished materials");
 
+    auto aggregate_start = std::chrono::high_resolution_clock::now();
     Primitive accel = parsedScene.CreateAggregate(textures, shapeIndexToAreaLights, media,
                                                   namedMaterials, materials);
-
+    auto aggregate_end = std::chrono::high_resolution_clock::now();
+    
     Camera camera = parsedScene.GetCamera();
     Film film = camera.GetFilm();
     Sampler sampler = parsedScene.GetSampler();
-
+    
     // Integrator
     LOG_VERBOSE("Starting to create integrator");
     std::unique_ptr<Integrator> integrator(
         parsedScene.CreateIntegrator(camera, sampler, accel, lights));
-    LOG_VERBOSE("Finished creating integrator");
-
-    // Helpful warnings
-    bool haveScatteringMedia = false;
-    for (const auto &sh : parsedScene.shapes)
+        LOG_VERBOSE("Finished creating integrator");
+        
+        // Helpful warnings
+        bool haveScatteringMedia = false;
+        for (const auto &sh : parsedScene.shapes)
         if (!sh.insideMedium.empty() || !sh.outsideMedium.empty())
-            haveScatteringMedia = true;
-    for (const auto &sh : parsedScene.animatedShapes)
+        haveScatteringMedia = true;
+        for (const auto &sh : parsedScene.animatedShapes)
         if (!sh.insideMedium.empty() || !sh.outsideMedium.empty())
-            haveScatteringMedia = true;
-
-    if (haveScatteringMedia && parsedScene.integrator.name != "volpath" &&
+        haveScatteringMedia = true;
+        
+        if (haveScatteringMedia && parsedScene.integrator.name != "volpath" &&
         parsedScene.integrator.name != "simplevolpath" &&
         parsedScene.integrator.name != "bdpt" && parsedScene.integrator.name != "mlt")
         Warning("Scene has scattering media but \"%s\" integrator doesn't support "
-                "volume scattering. Consider using \"volpath\", \"simplevolpath\", "
-                "\"bdpt\", or \"mlt\".",
+            "volume scattering. Consider using \"volpath\", \"simplevolpath\", "
+            "\"bdpt\", or \"mlt\".",
                 parsedScene.integrator.name);
-
-    bool haveLights = !lights.empty();
-    for (const auto &m : media)
-        haveLights |= m.second.IsEmissive();
-
-    if (!haveLights && parsedScene.integrator.name != "ambientocclusion" &&
-        parsedScene.integrator.name != "aov")
-        Warning("No light sources defined in scene; rendering a black image.");
-
-    if (film.Is<GBufferFilm>() && !(parsedScene.integrator.name == "path" ||
-                                    parsedScene.integrator.name == "volpath"))
-        Warning("GBufferFilm is not supported by the \"%s\" integrator. The channels "
-                "other than R, G, B will be zero.",
-                parsedScene.integrator.name);
-
-    bool haveSubsurface = false;
+                
+                bool haveLights = !lights.empty();
+                for (const auto &m : media)
+                haveLights |= m.second.IsEmissive();
+                
+                if (!haveLights && parsedScene.integrator.name != "ambientocclusion" &&
+                    parsedScene.integrator.name != "aov")
+                    Warning("No light sources defined in scene; rendering a black image.");
+                    
+                    if (film.Is<GBufferFilm>() && !(parsedScene.integrator.name == "path" ||
+                        parsedScene.integrator.name == "volpath"))
+                        Warning("GBufferFilm is not supported by the \"%s\" integrator. The channels "
+                            "other than R, G, B will be zero.",
+                            parsedScene.integrator.name);
+                            
+                            bool haveSubsurface = false;
     for (pbrt::Material mtl : materials)
-        haveSubsurface |= mtl && mtl.HasSubsurfaceScattering();
+    haveSubsurface |= mtl && mtl.HasSubsurfaceScattering();
     for (const auto &namedMtl : namedMaterials)
-        haveSubsurface |= namedMtl.second && namedMtl.second.HasSubsurfaceScattering();
-
+    haveSubsurface |= namedMtl.second && namedMtl.second.HasSubsurfaceScattering();
+    
     if (haveSubsurface && parsedScene.integrator.name != "volpath")
-        Warning("Some objects in the scene have subsurface scattering, which is "
-                "not supported by the %s integrator. Use the \"volpath\" integrator "
-                "to render them correctly.",
-                parsedScene.integrator.name);
-
-    LOG_VERBOSE("Memory used after scene creation: %d", GetCurrentRSS());
-
-    if (Options->pixelMaterial) {
-        SampledWavelengths lambda = SampledWavelengths::SampleUniform(0.5f);
-
-        CameraSample cs;
-        cs.pFilm = *Options->pixelMaterial + Vector2f(0.5f, 0.5f);
-        cs.time = 0.5f;
+    Warning("Some objects in the scene have subsurface scattering, which is "
+        "not supported by the %s integrator. Use the \"volpath\" integrator "
+        "to render them correctly.",
+        parsedScene.integrator.name);
+        
+        LOG_VERBOSE("Memory used after scene creation: %d", GetCurrentRSS());
+        
+        if (Options->pixelMaterial) {
+            SampledWavelengths lambda = SampledWavelengths::SampleUniform(0.5f);
+            
+            CameraSample cs;
+            cs.pFilm = *Options->pixelMaterial + Vector2f(0.5f, 0.5f);
+            cs.time = 0.5f;
         cs.pLens = Point2f(0.5f, 0.5f);
         cs.filterWeight = 1;
         pstd::optional<CameraRay> cr = camera.GenerateRay(cs, lambda);
         if (!cr)
-            ErrorExit("Unable to generate camera ray for specified pixel.");
-
+        ErrorExit("Unable to generate camera ray for specified pixel.");
+        
         int depth = 1;
         Ray ray = cr->ray;
         while (true) {
             pstd::optional<ShapeIntersection> isect = accel.Intersect(ray, Infinity);
             if (!isect) {
                 if (depth == 1)
-                    ErrorExit("No geometry visible at specified pixel.");
+                ErrorExit("No geometry visible at specified pixel.");
                 else
-                    break;
+                break;
             }
-
+            
             const SurfaceInteraction &intr = isect->intr;
             if (!intr.material)
-                Warning("Ignoring \"interface\" material at intersection.");
+            Warning("Ignoring \"interface\" material at intersection.");
             else {
                 Transform worldFromRender = camera.GetCameraTransform().WorldFromRender();
                 Printf("Intersection depth %d\n", depth);
@@ -138,30 +140,50 @@ void RenderCPU(BasicScene &parsedScene) {
 
                 bool isNamed = false;
                 for (const auto &mtl : namedMaterials)
-                    if (mtl.second == intr.material) {
-                        Printf("Named material: %s\n\n", mtl.first);
-                        isNamed = true;
+                if (mtl.second == intr.material) {
+                    Printf("Named material: %s\n\n", mtl.first);
+                    isNamed = true;
                         break;
                     }
-                if (!isNamed)
+                    if (!isNamed)
                     // If we didn't find a named material, dump out the whole thing.
                     Printf("%s\n\n", intr.material.ToString());
-
+                    
                 ++depth;
                 ray = intr.SpawnRay(ray.d);
             }
         }
-
+        
         return;
     }
-
+    
     // Render!
+    printf("METRICS Aggregate time : %f\n", std::chrono::duration<double>(aggregate_end - aggregate_start).count());
+    
+    auto render_start = std::chrono::high_resolution_clock::now();
     integrator->Render();
-    printf("\nIntersect time: %f\n", Options->intersect_time.count());
-    printf("\nIntersectP time: %f\n", Options->intersectP_time.count());
+    auto render_end = std::chrono::high_resolution_clock::now();
+    
 
-    LOG_VERBOSE("Memory used after rendering: %s", GetCurrentRSS());
+    printf("METRICS Render time    : %f\n", std::chrono::duration<double>(render_end - render_start).count());
 
+    double raybox_time = 0;
+    for(auto &[tid, time]: Options->raybox_time)
+        raybox_time += time.count();
+    printf("METRICS Raybox time    : %f\n", raybox_time);
+
+    double traversal_time = 0;
+    for(auto &[tid, time]: Options->traversal_time)
+        traversal_time += time.count();
+    printf("METRICS Traversal time : %f\n", traversal_time);
+
+    double dequant_time = 0;
+    for(auto &[tid, time]: Options->dequant_time)
+        dequant_time += time.count();
+    printf("METRICS Dequant time   : %f\n", dequant_time);
+
+
+    
     PtexTextureBase::ReportStats();
     ImageTextureBase::ClearCache();
 }

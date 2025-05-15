@@ -58,9 +58,10 @@ struct PBRTOptions : BasicPBRTOptions {
 
     bool WBVH = false;
     bool MEBVH = false;
-    std::chrono::duration<double> intersect_time = std::chrono::duration<double>::zero();
-    std::chrono::duration<double> intersectP_time = std::chrono::duration<double>::zero();
-
+    
+    std::unordered_map<pthread_t, std::chrono::duration<double>> raybox_time;
+    std::unordered_map<pthread_t, std::chrono::duration<double>> traversal_time;
+    std::unordered_map<pthread_t, std::chrono::duration<double>> dequant_time;
 
     std::string ToString() const;
 };

@@ -794,7 +794,7 @@ struct WBVHBuildNode {
 
 #include <immintrin.h>
 
-struct alignas(32) LinearWBVHNode {
+struct LinearWBVHNode {
 
     __m256 AABB[3][2];
 
@@ -820,6 +820,10 @@ struct alignas(32) LinearWBVHNode {
     }
 
     std::array<bool, WBVHAggregate::WIDTH> Intersect(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, Vector3f invDir, const int dirIsNeg[3]) const {
+        
+        #ifdef METRIC_RAYBOX
+            auto start = std::chrono::high_resolution_clock::now();
+        #endif
         std::array<bool, WBVHAggregate::WIDTH> hit;
         for(int i=0; i<WBVHAggregate::WIDTH; ++i){
             Bounds3f bounds(
@@ -828,16 +832,22 @@ struct alignas(32) LinearWBVHNode {
             );
             hit[i] = bounds.IntersectP(ray_o, ray_d, raytMax, invDir, dirIsNeg);
         }
+        #ifdef METRIC_RAYBOX
+            Options->raybox_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+        #endif
         return hit;
     }
 
     std::array<bool, WBVHAggregate::WIDTH> IntersectSIMD(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, Vector3f invDir, const int dirIsNeg[3]) const {
 
+        #ifdef METRIC_RAYBOX
+            auto start = std::chrono::high_resolution_clock::now();
+        #endif
         __m256 ray_o_xyz  = _mm256_set1_ps(ray_o.x);
         __m256 invDir_xyz = _mm256_set1_ps(invDir.x);
         __m256 tMin_xyz = _mm256_mul_ps(_mm256_sub_ps(AABB[0][    dirIsNeg[0]], ray_o_xyz), invDir_xyz);
         __m256 tMax_xyz = _mm256_mul_ps(_mm256_sub_ps(AABB[0][1 - dirIsNeg[0]], ray_o_xyz), invDir_xyz);
-
+        
         ray_o_xyz  = _mm256_set1_ps(ray_o.y);
         invDir_xyz = _mm256_set1_ps(invDir.y);
         tMin_xyz = _mm256_max_ps(
@@ -875,21 +885,25 @@ struct alignas(32) LinearWBVHNode {
         __m256 t_cmp = _mm256_cmp_ps(tMin_xyz, tMax_xyz, _CMP_LE_OQ);        
         t_cmp = _mm256_and_ps(t_cmp, _mm256_cmp_ps(tMax_xyz, _mm256_setzero_ps(), _CMP_GT_OQ));
         t_cmp = _mm256_and_ps(t_cmp, _mm256_cmp_ps(tMin_xyz, _mm256_set1_ps(raytMax), _CMP_LT_OQ));
-
+        
         std::array<bool, WBVHAggregate::WIDTH> hit;
         for(int i=0; i<WBVHAggregate::WIDTH; ++i)
-            hit[i] = std::isnan(t_cmp[i]);
+        hit[i] = std::isnan(t_cmp[i]);
+        
+        #ifdef METRIC_RAYBOX
+            Options->raybox_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+        #endif
         
         return hit;
     }
-
+    
 };
 
 // WBVH Method Definitions
 WBVHAggregate::WBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode)
-    : maxPrimsInNode(std::min(127, maxPrimsInNode)),
-      primitives(std::move(prims)) {
-
+: maxPrimsInNode(std::min(127, maxPrimsInNode)),
+primitives(std::move(prims)) {
+    
     CHECK(!primitives.empty());
     // Build BVH from _primitives_
     // Initialize _bvhPrimitives_ array for primitives
@@ -1142,82 +1156,6 @@ WBVHBuildNode *WBVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAlloc
     // octant sort
     node->sort();
 
-    // unsplitable internal node check
-    /*
-    for(int i=0; i<WBVHAggregate::WIDTH; ++i){
-        if(node->subNodes[i].type != WBVHBuildNode::SubNode::INTERNAL)
-            continue;
-
-        auto &target = node->subNodes[i];
-        if(target.bounds.SurfaceArea() == 0 || target.size() == 1)
-            target.type = WBVHBuildNode::SubNode::LEAF;
-        else {
-            int dim = target.centroidBounds.MaxDimension();
-            if(target.centroidBounds.pMax[dim] == target.centroidBounds.pMin[dim])
-                target.type = WBVHBuildNode::SubNode::LEAF;
-            else {
-                int mid = target.mid();
-                if (target.size() <= 2)
-                    target.type = WBVHBuildNode::SubNode::LEAF;
-                else {
-                    constexpr int nBuckets = 12;
-                    BVHSplitBucket buckets[nBuckets];
-
-                    for (const auto &prim : bvhPrimitives.subspan(target.start, target.size())) {
-                        int b = nBuckets * target.centroidBounds.Offset(prim.Centroid())[dim];
-                        if (b == nBuckets)
-                            b = nBuckets - 1;
-                        DCHECK_GE(b, 0);
-                        DCHECK_LT(b, nBuckets);
-                        buckets[b].count++;
-                        buckets[b].bounds = Union(buckets[b].bounds, prim.bounds);
-                    }
-                    // Compute costs for splitting after each bucket
-                    constexpr int nSplits = nBuckets - 1;
-                    Float costs[nSplits] = {};
-                    // Partially initialize _costs_ using a forward scan over splits
-                    int countBelow = 0;
-                    Bounds3f boundBelow;
-                    for (int i = 0; i < nSplits; ++i) {
-                        boundBelow = Union(boundBelow, buckets[i].bounds);
-                        countBelow += buckets[i].count;
-                        costs[i] += countBelow * boundBelow.SurfaceArea();
-                    }
-
-                    // Finish initializing _costs_ using a backward scan over splits
-                    int countAbove = 0;
-                    Bounds3f boundAbove;
-                    for (int i = nSplits; i >= 1; --i) {
-                        boundAbove = Union(boundAbove, buckets[i].bounds);
-                        countAbove += buckets[i].count;
-                        costs[i - 1] += countAbove * boundAbove.SurfaceArea();
-                    }
-
-                    // Find bucket to split at that minimizes SAH metric
-                    int minCostSplitBucket = -1;
-                    Float minCost = Infinity;
-                    for (int i = 0; i < nSplits; ++i) {
-                        // Compute cost for candidate split and update minimum if necessary
-                        if (costs[i] < minCost) {
-                            minCost = costs[i];
-                            minCostSplitBucket = i;
-                        }
-                    }
-                    // Compute leaf cost and SAH split cost for chosen split
-                    Float leafCost = target.size();
-                    minCost = 1.f / 2.f + minCost / target.bounds.SurfaceArea();
-
-                    // Either create leaf or split primitives at selected SAH bucket
-                    if (!(target.size() > maxPrimsInNode || minCost < leafCost)){
-                        target.type = WBVHBuildNode::SubNode::LEAF;
-                        continue;
-                    }
-                }
-            }
-        }
-    }
-    */
-
     // statistics
     int empty_cnt = 0;
     for(int i=0; i<WBVHAggregate::WIDTH; ++i){
@@ -1330,8 +1268,9 @@ int WBVHAggregate::flattenWBVH(WBVHBuildNode *node, int locate, int offset) {
 pstd::optional<ShapeIntersection> WBVHAggregate::Intersect(const Ray &ray, Float tMax) const {
     if (!nodes)
         return {};
-    auto start = std::chrono::high_resolution_clock::now();
-
+    #ifdef METRIC_TRAVERSAL
+        auto start = std::chrono::high_resolution_clock::now();
+    #endif
 
     pstd::optional<ShapeIntersection> si;
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
@@ -1368,7 +1307,10 @@ pstd::optional<ShapeIntersection> WBVHAggregate::Intersect(const Ray &ray, Float
         }
     }
     bvhNodesVisited += nodesVisited;
-    Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
+
+    #ifdef METRIC_TRAVERSAL
+        Options->traversal_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+    #endif
     return si;
 }
 
@@ -1376,7 +1318,10 @@ bool WBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
     if (!nodes)
         return {};
 
-    auto start = std::chrono::high_resolution_clock::now();
+
+    #ifdef METRIC_TRAVERSAL
+        auto start = std::chrono::high_resolution_clock::now();
+    #endif
 
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
     int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
@@ -1402,7 +1347,7 @@ bool WBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
                     for(int i=0; i< node->nPrimitives[child]; ++i){
                         if(primitives[node->offsets[child] + i].IntersectP(ray, tMax)){
                             bvhNodesVisited += nodesVisited;
-                            Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
+                            // Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
                             return true;
                         }
                     }
@@ -1414,7 +1359,10 @@ bool WBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
         }
     }
     bvhNodesVisited += nodesVisited;
-    Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
+
+    #ifdef METRIC_TRAVERSAL
+        Options->traversal_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+    #endif
     return false;
 }
 
@@ -1475,13 +1423,14 @@ struct MEBVHBuildNode {
 
 };
 
-struct alignas(64) LinearMEBVHNode{   
-    Float p[3];
+struct LinearMEBVHNode{
+// struct alignas(64) LinearMEBVHNode{   
+    Float    p[3];
     uint32_t primitive_offset = UINT32_MAX;
     uint32_t internal_offset : 24;
-    int8_t e[3];
-    uint8_t meta[MEBVHAggregate::WIDTH];
-    uint8_t q[3][2][MEBVHAggregate::WIDTH]; // dim / minmax / width
+    int8_t   e[3];
+    uint8_t  meta[MEBVHAggregate::WIDTH];
+    uint8_t  q[3][2][MEBVHAggregate::WIDTH]; // dim / minmax / width
 
     void init(MEBVHBuildNode* const node, const Bounds3f &bounds, const int &offset, const int &primitive_offset){
         this->internal_offset = offset;
@@ -1553,15 +1502,28 @@ struct alignas(64) LinearMEBVHNode{
     inline bool isEmpty(const int &i) const {
         return meta[i] == 0;
     }
+    inline uint32_t primitiveOffset() const {
+        return primitive_offset;
+    }
+    inline uint32_t internalOffset() const {
+        return internal_offset;
+    }
 
     std::array<bool, MEBVHAggregate::WIDTH> Intersect(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, const Vector3f &invDir, const int dirIsNeg[3]) const {
+        #ifdef METRIC_RAYBOX
+        auto start = std::chrono::high_resolution_clock::now();
+        #endif
+        
         std::array<bool, MEBVHAggregate::WIDTH> hit;
         for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
             if(isEmpty(i))
-                hit[i] = false;
+            hit[i] = false;
             else
-                hit[i] = bounds(i).IntersectP(ray_o, ray_d, raytMax, invDir, dirIsNeg);
+            hit[i] = bounds(i).IntersectP(ray_o, ray_d, raytMax, invDir, dirIsNeg);
         }
+        #ifdef METRIC_RAYBOX
+            Options->raybox_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+        #endif
         return hit;
     }
 
@@ -1576,16 +1538,259 @@ struct alignas(64) LinearMEBVHNode{
 
     #define _mm256_submul_ps(a, b, c) _mm256_mul_ps(_mm256_sub_ps(a, b), c)
 
+    inline __m256 set_load(int d, int m) const {
+        return _mm256_set_ps(0, 0, q[d][m][5], q[d][m][4], q[d][m][3], q[d][m][2], q[d][m][1], q[d][m][0]);
+    }
+
     inline __m256 dequant(int d, int m) const {
         return _mm256_fmadd_ps(_mm256_set_ps(0, 0, q[d][m][5], q[d][m][4], q[d][m][3], q[d][m][2], q[d][m][1], q[d][m][0]), _mm256_set1_ps(fast_exp2(e[d])), _mm256_set1_ps(p[d])); 
     }
 
     std::array<bool, MEBVHAggregate::WIDTH> IntersectSIMD(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, const Vector3f &invDir, const int dirIsNeg[3]) const {
+        
+
+        #ifdef METRIC_RAYBOX
+        auto start = std::chrono::high_resolution_clock::now();
+        #endif
+        __m256 ray_o_xyz = _mm256_set1_ps(ray_o.x);
+        __m256 invDir_xyz = _mm256_set1_ps(invDir.x);
+        
+        #ifdef METRIC_DEQUANT
+            auto set_min0 = set_load(0, dirIsNeg[0]);
+            auto set_max0 = set_load(0, !dirIsNeg[0]);
+            auto set_min1 = set_load(1, dirIsNeg[1]);
+            auto set_max1 = set_load(1, !dirIsNeg[1]);
+            auto set_min2 = set_load(2, dirIsNeg[2]);
+            auto set_max2 = set_load(2, !dirIsNeg[2]);
+            auto e0 = _mm256_set1_ps(fast_exp2(e[0]));
+            auto e1 = _mm256_set1_ps(fast_exp2(e[1]));
+            auto e2 = _mm256_set1_ps(fast_exp2(e[2]));
+            auto p0 = _mm256_set1_ps(p[0]);
+            auto p1 = _mm256_set1_ps(p[1]);
+            auto p2 = _mm256_set1_ps(p[2]);
+
+            auto start_dequant = std::chrono::high_resolution_clock::now();
+            auto dequant_min0 = _mm256_fmadd_ps(set_min0, e0, p0);
+            auto dequant_max0 = _mm256_fmadd_ps(set_max0, e0, p0);
+            auto dequant_min1 = _mm256_fmadd_ps(set_min1, e1, p1);
+            auto dequant_max1 = _mm256_fmadd_ps(set_max1, e1, p1);
+            auto dequant_min2 = _mm256_fmadd_ps(set_min2, e2, p2);
+            auto dequant_max2 = _mm256_fmadd_ps(set_max2, e2, p2);
+            Options->dequant_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start_dequant;
+
+            __m256 tMin_xyz = _mm256_submul_ps(dequant_min0, ray_o_xyz, invDir_xyz);
+            __m256 tMax_xyz = _mm256_submul_ps(dequant_max0, ray_o_xyz, invDir_xyz);
+            
+            ray_o_xyz  = _mm256_set1_ps(ray_o.y);
+            invDir_xyz = _mm256_set1_ps(invDir.y);
+            tMin_xyz = _mm256_max_ps(
+                tMin_xyz,
+                _mm256_submul_ps(dequant_min1, ray_o_xyz, invDir_xyz)
+            );
+            tMax_xyz = _mm256_min_ps(
+                tMax_xyz,
+                _mm256_submul_ps(dequant_max1, ray_o_xyz, invDir_xyz)
+            );
+            
+            ray_o_xyz = _mm256_set1_ps(ray_o.z);
+            invDir_xyz = _mm256_set1_ps(invDir.z);
+            tMin_xyz = _mm256_max_ps(
+                tMin_xyz,
+                _mm256_submul_ps(dequant_min2, ray_o_xyz, invDir_xyz)
+            );
+            tMax_xyz = _mm256_min_ps(
+                tMax_xyz,
+                _mm256_submul_ps(dequant_max2, ray_o_xyz, invDir_xyz)
+            );
+
+        #else
+            __m256 tMin_xyz = _mm256_submul_ps(dequant(0,  dirIsNeg[0]), ray_o_xyz, invDir_xyz);
+            __m256 tMax_xyz = _mm256_submul_ps(dequant(0, !dirIsNeg[0]), ray_o_xyz, invDir_xyz);
+            
+            ray_o_xyz  = _mm256_set1_ps(ray_o.y);
+            invDir_xyz = _mm256_set1_ps(invDir.y);
+            tMin_xyz = _mm256_max_ps(
+                tMin_xyz,
+                _mm256_submul_ps(dequant(1, dirIsNeg[1]), ray_o_xyz, invDir_xyz)
+            );
+            tMax_xyz = _mm256_min_ps(
+                tMax_xyz,
+                _mm256_submul_ps(dequant(1, !dirIsNeg[1]), ray_o_xyz, invDir_xyz)
+            );
+            
+            ray_o_xyz = _mm256_set1_ps(ray_o.z);
+            invDir_xyz = _mm256_set1_ps(invDir.z);
+            tMin_xyz = _mm256_max_ps(
+                tMin_xyz,
+                _mm256_submul_ps(dequant(2, dirIsNeg[2]), ray_o_xyz, invDir_xyz)
+            );
+            tMax_xyz = _mm256_min_ps(
+                tMax_xyz,
+                _mm256_submul_ps(dequant(2, !dirIsNeg[2]), ray_o_xyz, invDir_xyz)
+            ); 
+        #endif 
+
+        __m256 t_cmp = _mm256_cmp_ps(tMin_xyz, tMax_xyz, _CMP_LE_OQ);        
+        t_cmp = _mm256_and_ps(t_cmp, _mm256_cmp_ps(tMax_xyz, _mm256_setzero_ps(), _CMP_GT_OQ));
+        t_cmp = _mm256_and_ps(t_cmp, _mm256_cmp_ps(tMin_xyz, _mm256_set1_ps(raytMax), _CMP_LT_OQ));
+        
+        // Options->intersect_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+        
+        
+        std::array<bool, MEBVHAggregate::WIDTH> hit;
+        for(int i=0; i<MEBVHAggregate::WIDTH; ++i)
+        hit[i] = std::isnan(t_cmp[i]);   
+        #ifdef METRIC_RAYBOX
+            Options->raybox_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+        #endif
+        
+        return hit;
+    }
+    
+    
+    std::string ToString(){
+        std::string str = "";
+        str += pbrt::StringPrintf("p: 0x%08x 0x%08x 0x%08x\n", *((uint32_t *)(&p[0])), *((uint32_t *)(&p[1])), *((uint32_t *)(&p[2])));
+        str += pbrt::StringPrintf("e: %hhx %hhx %hhx\n", *((uint8_t *)(&e[0])), *((uint8_t *)(&e[1])), *((uint8_t *)(&e[2])));
+        uint32_t tmp_intermal_offset = internal_offset;
+        str += pbrt::StringPrintf("internal_offset: 0x%08x\n", tmp_intermal_offset);
+        str += pbrt::StringPrintf("primitive_offset: 0x%08x\n", primitive_offset);
+        for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
+            str += pbrt::StringPrintf("meta[%d]: %hhx\n", i, meta[i]);
+            for(int dim=0; dim<3; ++dim){
+                str += pbrt::StringPrintf("q[%d][0][%d]: %hhx\n", dim, i, q[dim][0][i]);
+                str += pbrt::StringPrintf("q[%d][1][%d]: %hhx\n", dim, i, q[dim][1][i]);
+            }
+        }
+        return str;
+    }
+};
+
+struct alignas(64) LinearMEBVHNode_4{   
+    Float       p[3];
+    uint32_t    primitive_offset = UINT32_MAX;
+    uint32_t    internal_offset : 24;
+    int8_t      e[3];
+    uint8_t     meta[MEBVHAggregate::WIDTH];
+    uint8_t     q[3][2][MEBVHAggregate::WIDTH]; // dim / minmax / width
+    
+    void init(MEBVHBuildNode* const node, const Bounds3f &bounds, const int &offset, const int &primitive_offset){
+        this->internal_offset = offset;
+        this->primitive_offset = primitive_offset;
+        for(int dim = 0; dim < 3; ++dim){
+            this->p[dim] = bounds.pMin[dim];
+            auto e_i = [](const Float &min, const Float &max){
+                return pstd::ceil(Log2((max - min + 0.00000001f) / 15.0));
+            };
+            int32_t tE = e_i(bounds.pMin[dim], bounds.pMax[dim]);
+            this->e[dim] = std::max(INT8_MIN, std::min(INT8_MAX, tE));
+        }
+
+        int internal_cnt = 0;
+        for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
+            if(node->subNodes[i].type == MEBVHBuildNode::SubNode::INTERNAL){
+                for(int dim = 0; dim < 3; ++dim){
+                    int32_t tQ_lo = pstd::floor((node->subNodes[i].bounds.pMin[dim] - p[dim]) / fast_exp2(e[dim]));
+                    int32_t tQ_hi = pstd::ceil((node->subNodes[i].bounds.pMax[dim] - p[dim]) / fast_exp2(e[dim]));
+                    CHECK_GE(tQ_lo, 0); CHECK_LE(tQ_lo, 15);
+                    CHECK_GE(tQ_hi, 0); CHECK_LE(tQ_hi, 15);
+                    this->q[dim][0][i] = tQ_lo;
+                    this->q[dim][1][i] = tQ_hi;
+                }
+                CHECK_LT(internal_cnt, 8);
+                meta[i] = 0b11111000 | (internal_cnt++);
+            }
+            else if(node->subNodes[i].type == MEBVHBuildNode::SubNode::LEAF){
+                for(int dim = 0; dim < 3; ++dim){
+                    int32_t tQ_lo = pstd::floor((node->subNodes[i].bounds.pMin[dim] - p[dim]) / fast_exp2(e[dim]));
+                    int32_t tQ_hi = pstd::ceil((node->subNodes[i].bounds.pMax[dim] - p[dim]) / fast_exp2(e[dim]));
+                    CHECK_GE(tQ_lo, 0); CHECK_LE(tQ_lo, 15);
+                    CHECK_GE(tQ_hi, 0); CHECK_LE(tQ_hi, 15);
+                    this->q[dim][0][i] = tQ_lo;
+                    this->q[dim][1][i] = tQ_hi;
+                }
+                CHECK_LT(node->subNodes[i].nPrimitives, 248);
+                meta[i] = node->subNodes[i].nPrimitives;
+            }
+            else if(node->subNodes[i].type == MEBVHBuildNode::SubNode::EMPTY){
+                meta[i] = 0;
+            }
+        }
+    }
+    Bounds3f bounds(const int &i) const {
+        Bounds3f b;
+        for(int dim = 0; dim < 3; ++dim){
+            b.pMin[dim] = p[dim] + q[dim][0][i] * fast_exp2(e[dim]);
+            b.pMax[dim] = p[dim] + q[dim][1][i] * fast_exp2(e[dim]);
+        }
+        return b;
+    }
+    uint32_t offset(const int &i) const {
+        CHECK(isInternal(i));
+        return internal_offset + (meta[i] & 0b00000111);
+    }
+    uint32_t nPrimitives(const int &i) const {
+        CHECK(isLeaf(i));        
+        return meta[i];
+    }
+    inline bool isInternal(const int &i) const {
+        return (meta[i] & 0b11111000) == 0b11111000;
+    }
+    inline bool isLeaf(const int &i) const {
+        return meta[i] < 0b11111000 && meta[i] != 0;
+    }
+    inline bool isEmpty(const int &i) const {
+        return meta[i] == 0;
+    }
+    inline uint32_t primitiveOffset() const {
+        return primitive_offset;
+    }
+    inline uint32_t internalOffset() const {
+        return internal_offset;
+    }
+    
+
+    std::array<bool, MEBVHAggregate::WIDTH> Intersect(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, const Vector3f &invDir, const int dirIsNeg[3]) const {
+        #ifdef METRIC_RAYBOX
+        auto start = std::chrono::high_resolution_clock::now();
+        #endif
+        
+        std::array<bool, MEBVHAggregate::WIDTH> hit;
+        for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
+            if(isEmpty(i))
+            hit[i] = false;
+            else
+            hit[i] = bounds(i).IntersectP(ray_o, ray_d, raytMax, invDir, dirIsNeg);
+        }
+        #ifdef METRIC_RAYBOX
+            Options->raybox_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+        #endif
+        
+        return hit;
+    }
+
+    inline float fast_exp2(int8_t e) const {
+        union {
+            uint32_t u;
+            float f;
+        } converter;
+        converter.u = ((e + 127) << 23);
+        return converter.f;
+    }
+
+    inline __m256 dequant(int d, int m) const {
+        return _mm256_fmadd_ps(_mm256_set_ps(0, 0, q[d][m][5], q[d][m][4], q[d][m][3], q[d][m][2], q[d][m][1], q[d][m][0]), _mm256_set1_ps(fast_exp2(e[d])), _mm256_set1_ps(p[d])); 
+    }
+
+    std::array<bool, MEBVHAggregate::WIDTH> IntersectSIMD(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, const Vector3f &invDir, const int dirIsNeg[3]) const {
+        #ifdef METRIC_RAYBOX
+        auto start = std::chrono::high_resolution_clock::now();
+        #endif
         __m256 ray_o_xyz = _mm256_set1_ps(ray_o.x);
         __m256 invDir_xyz = _mm256_set1_ps(invDir.x);                                                                     
         __m256 tMin_xyz = _mm256_submul_ps(dequant(0,  dirIsNeg[0]), ray_o_xyz, invDir_xyz);
         __m256 tMax_xyz = _mm256_submul_ps(dequant(0, !dirIsNeg[0]), ray_o_xyz, invDir_xyz);
-
+        
         ray_o_xyz  = _mm256_set1_ps(ray_o.y);
         invDir_xyz = _mm256_set1_ps(invDir.y);
         tMin_xyz = _mm256_max_ps(
@@ -1596,7 +1801,7 @@ struct alignas(64) LinearMEBVHNode{
             tMax_xyz,
             _mm256_submul_ps(dequant(1, !dirIsNeg[1]), ray_o_xyz, invDir_xyz)
         );
-
+        
         ray_o_xyz = _mm256_set1_ps(ray_o.z);
         invDir_xyz = _mm256_set1_ps(invDir.z);
         tMin_xyz = _mm256_max_ps(
@@ -1607,17 +1812,22 @@ struct alignas(64) LinearMEBVHNode{
             tMax_xyz,
             _mm256_submul_ps(dequant(2, !dirIsNeg[2]), ray_o_xyz, invDir_xyz)
         );
-
+        
         __m256 t_cmp = _mm256_cmp_ps(tMin_xyz, tMax_xyz, _CMP_LE_OQ);        
         t_cmp = _mm256_and_ps(t_cmp, _mm256_cmp_ps(tMax_xyz, _mm256_setzero_ps(), _CMP_GT_OQ));
         t_cmp = _mm256_and_ps(t_cmp, _mm256_cmp_ps(tMin_xyz, _mm256_set1_ps(raytMax), _CMP_LT_OQ));
         std::array<bool, MEBVHAggregate::WIDTH> hit;
         for(int i=0; i<MEBVHAggregate::WIDTH; ++i)
-            hit[i] = std::isnan(t_cmp[i]);   
+        hit[i] = std::isnan(t_cmp[i]);   
+    
+        #ifdef METRIC_RAYBOX
+            Options->raybox_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+        #endif
+        
         return hit;
     }
-
-
+    
+    
     std::string ToString(){
         std::string str = "";
         str += pbrt::StringPrintf("p: 0x%08x 0x%08x 0x%08x\n", *((uint32_t *)(&p[0])), *((uint32_t *)(&p[1])), *((uint32_t *)(&p[2])));
@@ -1638,8 +1848,9 @@ struct alignas(64) LinearMEBVHNode{
 
 
 
-static const __m256i m256_0xFF = _mm256_set1_epi32(0xFF);
 
+
+static const __m256i m256_0xFF = _mm256_set1_epi32(0xFF);
 struct alignas(64) LinearOptimizedMEBVHNode{
     alignas(64) union {
         __m256i  m256i;
@@ -1648,7 +1859,7 @@ struct alignas(64) LinearOptimizedMEBVHNode{
         int8_t   i8[32];
         uint8_t  u8[32];
         // b256[0]
-        // 24B | qmin[0].x qmin[0].y qmin[0].z meta[0] | ... | qmax[5].x qmax[5].y qmax[5].z meta[5] |
+        // 24B | qmin[0].x qmin[0].y qmin[0].z meta[0] | ... | qmin[5].x qmin[5].y qminx[5].z meta[5] |
         // 8B  | p[0] | p[1] |  
 
         // b256[1]
@@ -1721,9 +1932,9 @@ struct alignas(64) LinearOptimizedMEBVHNode{
         for(int i=0; i<6; ++i)
             CHECK_EQ(unlignedNode.meta[i], meta(i));
         // check internal_offset
-        CHECK_EQ(unlignedNode.internal_offset, internal_offset());
+        CHECK_EQ(unlignedNode.internal_offset, internalOffset());
         // check primitive_offset
-        CHECK_EQ(unlignedNode.primitive_offset, this->primitive_offset());
+        CHECK_EQ(unlignedNode.primitive_offset, this->primitiveOffset());
 
         // check leaf int attributes
         for(int i=0; i<6; ++i){
@@ -1743,15 +1954,15 @@ struct alignas(64) LinearOptimizedMEBVHNode{
         return b;
     }
 
-    inline uint32_t internal_offset() const {
+    inline uint32_t internalOffset() const {
         return (uint32_t)b256[1].u8[12] << 0 | (uint32_t)b256[1].u8[16] << 8 | (uint32_t)b256[1].u8[20] << 16;
     }
-    inline uint32_t primitive_offset() const {
+    inline uint32_t primitiveOffset() const {
         return b256[1].u32[7];
     }
     inline int32_t offset(const int &i) const {
         // CHECK(isInternal(i));
-        return internal_offset() + (meta(i) & 0b00000111);
+        return internalOffset() + (meta(i) & 0b00000111);
     }
     inline int32_t nPrimitives(const int &i) const {
         // CHECK(isLeaf(i));        
@@ -1795,41 +2006,39 @@ struct alignas(64) LinearOptimizedMEBVHNode{
         )
 
     std::array<bool, MEBVHAggregate::WIDTH> IntersectSIMD(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, const Vector3f &invDir, const int dirIsNeg[3]) const {
+        #ifdef METRIC_RAYBOX
+        auto start = std::chrono::high_resolution_clock::now();
+        #endif
+        
         __m256 p_minus_o = _mm256_set1_ps(p(0) - ray_o.x);
         __m256 invDir_xyz = _mm256_set1_ps(invDir.x);
         __m256 e256 = _mm256_set1_ps(fast_exp2(e(0)));
         __m256 tMin_xyz = dequant_compute_t(0,  dirIsNeg[0], e256, p_minus_o, invDir_xyz);
         __m256 tMax_xyz = dequant_compute_t(0, !dirIsNeg[0], e256, p_minus_o, invDir_xyz);
-
+        
         p_minus_o  = _mm256_set1_ps(p(1) - ray_o.y);
         invDir_xyz = _mm256_set1_ps(invDir.y);
         e256 = _mm256_set1_ps(fast_exp2(e(1)));
-        tMin_xyz = _mm256_max_ps(
-            tMin_xyz,
-            dequant_compute_t(1,  dirIsNeg[1], e256, p_minus_o, invDir_xyz)
-        );
-        tMax_xyz = _mm256_min_ps(
-            tMax_xyz,
-            dequant_compute_t(1, !dirIsNeg[1], e256, p_minus_o, invDir_xyz)
-        );
+        tMin_xyz = _mm256_max_ps(tMin_xyz, dequant_compute_t(1,  dirIsNeg[1], e256, p_minus_o, invDir_xyz));
+        tMax_xyz = _mm256_min_ps(tMax_xyz, dequant_compute_t(1, !dirIsNeg[1], e256, p_minus_o, invDir_xyz));
+        
         p_minus_o = _mm256_set1_ps(p(2) - ray_o.z);
         invDir_xyz = _mm256_set1_ps(invDir.z);
         e256 = _mm256_set1_ps(fast_exp2(e(2)));
-        tMin_xyz = _mm256_max_ps(
-            tMin_xyz,
-            dequant_compute_t(2,  dirIsNeg[2], e256, p_minus_o, invDir_xyz)
-        );
-        tMax_xyz = _mm256_min_ps(
-            tMax_xyz,
-            dequant_compute_t(2, !dirIsNeg[2], e256, p_minus_o, invDir_xyz)
-        );
-
+        tMin_xyz = _mm256_max_ps(tMin_xyz, dequant_compute_t(2,  dirIsNeg[2], e256, p_minus_o, invDir_xyz));
+        tMax_xyz = _mm256_min_ps(tMax_xyz, dequant_compute_t(2, !dirIsNeg[2], e256, p_minus_o, invDir_xyz));
+        
         __m256 t_cmp = _mm256_cmp_ps(tMin_xyz, tMax_xyz, _CMP_LE_OQ);        
         t_cmp = _mm256_and_ps(t_cmp, _mm256_cmp_ps(tMax_xyz, _mm256_setzero_ps(), _CMP_GT_OQ));
         t_cmp = _mm256_and_ps(t_cmp, _mm256_cmp_ps(tMin_xyz, _mm256_set1_ps(raytMax), _CMP_LT_OQ));
+        // Options->intersect_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
         std::array<bool, MEBVHAggregate::WIDTH> hit;
         for(int i=0; i<MEBVHAggregate::WIDTH; ++i)
-            hit[i] = std::isnan(t_cmp[i]);   
+        hit[i] = std::isnan(t_cmp[i]);   
+        #ifdef METRIC_RAYBOX
+            Options->raybox_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+        #endif
+        
         return hit;
     }
     
@@ -1876,14 +2085,15 @@ MEBVHAggregate::MEBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode)
     // Convert BVH into compact representation in _nodes_ array
     bvhPrimitives.resize(0);
     bvhPrimitives.shrink_to_fit();
-    LOG_VERBOSE("MEBVH created with %d nodes for %d primitives (%.2f MB)",
+    LOG_CONCISE("MEBVH created with %d nodes for %d primitives (%.2f MB)",
                 totalNodes.load(), (int)primitives.size(),
-                float(totalNodes.load() * sizeof(LinearOptimizedMEBVHNode)) / (1024.f * 1024.f));
-    treeBytes += totalNodes * sizeof(LinearOptimizedMEBVHNode) + sizeof(*this) +
+                float(totalNodes.load() * sizeof(LinearNode)) / (1024.f * 1024.f));
+    treeBytes += totalNodes * sizeof(LinearNode) + sizeof(*this) +
                  primitives.size() * sizeof(primitives[0]);
-    nodes = new LinearOptimizedMEBVHNode[totalNodes];
+    nodes = new LinearNode[totalNodes];
+    printf("Address of nodes: %p\n", static_cast<void*>(nodes));
 
-    CHECK(sizeof(LinearOptimizedMEBVHNode) == 64);
+    CHECK(sizeof(LinearNode) == 64);
 
     int offset = flattenMEBVH(root, 0, 1);
     CHECK_EQ(totalNodes.load(), offset);
@@ -2232,7 +2442,7 @@ MEBVHBuildNode* MEBVHAggregate::buildRecursive(
 }
 
 int MEBVHAggregate::flattenMEBVH(MEBVHBuildNode *node, int locate, int offset){
-    LinearOptimizedMEBVHNode *linearNode = &nodes[locate];
+    auto *linearNode = &nodes[locate];
 
     // find next_offset
     // find the full bound and primitive_offset of node
@@ -2260,7 +2470,7 @@ int MEBVHAggregate::flattenMEBVH(MEBVHBuildNode *node, int locate, int offset){
     // LinearOptimizedMEBVHNode optimizedNode;
     // optimizedNode.init(node, bounds, offset, first_primitive_offset);
 
-    int primitive_offset = linearNode->primitive_offset();
+    int primitive_offset = linearNode->primitiveOffset();
     for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
         if(node->subNodes[i].type == MEBVHBuildNode::SubNode::INTERNAL){
             // ground truth            
@@ -2311,10 +2521,11 @@ Bounds3f MEBVHAggregate::Bounds() const {
 
 pstd::optional<ShapeIntersection> MEBVHAggregate::Intersect(const Ray &ray, Float tMax) const {
     if (!nodes)
-        return {};
-
-    auto start = std::chrono::high_resolution_clock::now();
-
+    return {};
+    #ifdef METRIC_TRAVERSAL
+        auto start = std::chrono::high_resolution_clock::now();
+    #endif
+    
     pstd::optional<ShapeIntersection> si;
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
     int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
@@ -2323,30 +2534,30 @@ pstd::optional<ShapeIntersection> MEBVHAggregate::Intersect(const Ray &ray, Floa
     int nodesToVisit[64];
     int nodesVisited = nodesToVisit[0] = 0;
     uint32_t primitive_offsets[MEBVHAggregate::WIDTH];
-
+    
     while (toVisitOffset > 0) {
         ++nodesVisited;
-        const LinearOptimizedMEBVHNode *node = &nodes[nodesToVisit[--toVisitOffset]];
+        const auto *node = &nodes[nodesToVisit[--toVisitOffset]];
         auto hit = node->IntersectSIMD(ray.o, ray.d, tMax, invDir, dirIsNeg);
         
         // decompress primitive_offsets;
-        int current_offset = node->primitive_offset();
+        int current_offset = node->primitiveOffset();
         for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
             if(node->isLeaf(i)){
                 primitive_offsets[i] = current_offset;
                 current_offset += node->nPrimitives(i);
             }
         }
-
+        
         for(int octant = 7; octant >= 0; --octant){
             int child = octant ^ rayOctant;
             if(child >= MEBVHAggregate::WIDTH)
-                continue;
+            continue;
             else if(hit[child]){
                 if(node->isLeaf(child)){
                     for(int i=0; i < node->nPrimitives(child); ++i){
                         pstd::optional<ShapeIntersection> primSi =
-                            primitives[primitive_offsets[child] + i].Intersect(ray, tMax);
+                        primitives[primitive_offsets[child] + i].Intersect(ray, tMax);
                         if(primSi){
                             si = primSi;
                             tMax = si->tHit;
@@ -2360,55 +2571,57 @@ pstd::optional<ShapeIntersection> MEBVHAggregate::Intersect(const Ray &ray, Floa
         }
     }
     bvhNodesVisited += nodesVisited;
-
-    Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
+    
+    #ifdef METRIC_TRAVERSAL
+        Options->traversal_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+    #endif
     return si;
 };
 
 bool MEBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
-    
     if (!nodes)
         return {};
 
-    auto start = std::chrono::high_resolution_clock::now();
-
-
+    #ifdef METRIC_TRAVERSAL
+        auto start = std::chrono::high_resolution_clock::now();
+    #endif
+    
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
     int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
     // Follow ray through BVH nodes to find primitive intersections
-
+    
     int toVisitOffset = 1;
     int nodesToVisit[64];
     int nodesVisited = 0;
     nodesToVisit[0] = 0;
     uint32_t primitive_offsets[MEBVHAggregate::WIDTH];
-
-
+    
+    
     while (toVisitOffset > 0) {
         ++nodesVisited;
-        const LinearOptimizedMEBVHNode *node = &nodes[nodesToVisit[--toVisitOffset]];
+        const auto *node = &nodes[nodesToVisit[--toVisitOffset]];
         auto hit = node->IntersectSIMD(ray.o, ray.d, tMax, invDir, dirIsNeg);
 
         // decompress primitive_offsets;
-        int current_offset = node->primitive_offset();
+        int current_offset = node->primitiveOffset();
         for(int i=0; i<MEBVHAggregate::WIDTH; ++i){
             if(node->isLeaf(i)){
                 primitive_offsets[i] = current_offset;
                 current_offset += node->nPrimitives(i);
             }
         }
-
+        
         for(int child = 0; child < MEBVHAggregate::WIDTH; ++child){
             if(child >= MEBVHAggregate::WIDTH)
                 continue;
-            else if(node->isEmpty(child))
+                else if(node->isEmpty(child))
                 continue;
-            else if(hit[child]){
-                if(node->isLeaf(child)){
+                else if(hit[child]){
+                    if(node->isLeaf(child)){
                     for(int i=0; i< node->nPrimitives(child); ++i){
                         if(primitives[primitive_offsets[child] + i].IntersectP(ray, tMax)){
                             bvhNodesVisited += nodesVisited;
-                            Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
+                            // Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
                             return true;
                         }
                     }
@@ -2420,7 +2633,9 @@ bool MEBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
         }
     }
     bvhNodesVisited += nodesVisited;
-    Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
+    #ifdef METRIC_TRAVERSAL
+        Options->traversal_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+    #endif
     return false;
 
 };
