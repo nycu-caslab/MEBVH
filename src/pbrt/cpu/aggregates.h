@@ -112,6 +112,8 @@ struct LinearMEBVHNode;
 struct LinearMEBVHNode_4;
 struct LinearOptimizedMEBVHNode;
 
+
+
 class MEBVHAggregate {
   public:
     // MEBVHAggregate Public Methods
@@ -141,8 +143,8 @@ class MEBVHAggregate {
     using LinearNode = LinearMEBVHNode;
     // using LinearNode = LinearMEBVHNode_4;
 
-    // #define METRIC_TRAVERSAL
-    // #define METRIC_RAYBOX
+    #define METRIC_TRAVERSAL
+    #define METRIC_RAYBOX
     // #define METRIC_DEQUANT
     LinearNode *nodes = nullptr;
 };

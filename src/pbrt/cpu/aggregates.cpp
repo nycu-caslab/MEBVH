@@ -26,6 +26,16 @@ STAT_COUNTER("BVH/Interior nodes", interiorNodes);
 STAT_COUNTER("BVH/Leaf nodes", leafNodes);
 STAT_PIXEL_COUNTER("BVH/Nodes visited", bvhNodesVisited);
 
+
+
+STAT_COUNTER("BVH/Build Time (ns)", bvhBuildTime);
+#ifdef METRIC_TRAVERSAL
+    STAT_COUNTER("BVH/Traveral Time (ns)", bvhTraversalTime);
+#endif
+#ifdef METRIC_RAYBOX
+    STAT_COUNTER("BVH/RayBox Time (ns)", bvhRayBoxTime);
+#endif
+
 // MortonPrimitive Definition
 struct MortonPrimitive {
     int primitiveIndex;
@@ -142,6 +152,9 @@ BVHAggregate::BVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode,
     : maxPrimsInNode(std::min(255, maxPrimsInNode)),
       primitives(std::move(prims)),
       splitMethod(splitMethod) {
+
+    auto start = std::chrono::high_resolution_clock::now();
+
     CHECK(!primitives.empty());
     // Build BVH from _primitives_
     // Initialize _bvhPrimitives_ array for primitives
@@ -187,6 +200,9 @@ BVHAggregate::BVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode,
     int offset = 0;
     flattenBVH(root, &offset);
     CHECK_EQ(totalNodes.load(), offset);
+
+    auto end = std::chrono::high_resolution_clock::now();
+    bvhBuildTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
 }
 
 BVHBuildNode *BVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAllocators,
@@ -833,7 +849,8 @@ struct LinearWBVHNode {
             hit[i] = bounds.IntersectP(ray_o, ray_d, raytMax, invDir, dirIsNeg);
         }
         #ifdef METRIC_RAYBOX
-            Options->raybox_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+            auto end = std::chrono::high_resolution_clock::now();
+            bvhRayBoxTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
         #endif
         return hit;
     }
@@ -891,7 +908,8 @@ struct LinearWBVHNode {
         hit[i] = std::isnan(t_cmp[i]);
         
         #ifdef METRIC_RAYBOX
-            Options->raybox_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+            auto end = std::chrono::high_resolution_clock::now();
+            bvhRayBoxTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
         #endif
         
         return hit;
@@ -905,6 +923,8 @@ WBVHAggregate::WBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode)
 primitives(std::move(prims)) {
     
     CHECK(!primitives.empty());
+    auto start = std::chrono::high_resolution_clock::now();
+    
     // Build BVH from _primitives_
     // Initialize _bvhPrimitives_ array for primitives
     std::vector<BVHPrimitive> bvhPrimitives(primitives.size());
@@ -955,6 +975,9 @@ primitives(std::move(prims)) {
     int offset = flattenWBVH(root, 0, 1);
 
     CHECK_EQ(totalNodes.load(), offset);
+
+    auto end = std::chrono::high_resolution_clock::now();
+    bvhBuildTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
 }
 
 
@@ -1309,7 +1332,8 @@ pstd::optional<ShapeIntersection> WBVHAggregate::Intersect(const Ray &ray, Float
     bvhNodesVisited += nodesVisited;
 
     #ifdef METRIC_TRAVERSAL
-        Options->traversal_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+        auto end = std::chrono::high_resolution_clock::now();
+        bvhTraversalTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
     #endif
     return si;
 }
@@ -1361,7 +1385,8 @@ bool WBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
     bvhNodesVisited += nodesVisited;
 
     #ifdef METRIC_TRAVERSAL
-        Options->traversal_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+        auto end = std::chrono::high_resolution_clock::now();
+        bvhTraversalTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
     #endif
     return false;
 }
@@ -1522,7 +1547,8 @@ struct LinearMEBVHNode{
             hit[i] = bounds(i).IntersectP(ray_o, ray_d, raytMax, invDir, dirIsNeg);
         }
         #ifdef METRIC_RAYBOX
-            Options->raybox_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+            auto end = std::chrono::high_resolution_clock::now();
+            bvhRayBoxTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
         #endif
         return hit;
     }
@@ -1641,7 +1667,8 @@ struct LinearMEBVHNode{
         for(int i=0; i<MEBVHAggregate::WIDTH; ++i)
         hit[i] = std::isnan(t_cmp[i]);   
         #ifdef METRIC_RAYBOX
-            Options->raybox_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+            auto end = std::chrono::high_resolution_clock::now();
+            bvhRayBoxTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
         #endif
         
         return hit;
@@ -1752,7 +1779,7 @@ struct alignas(64) LinearMEBVHNode_4{
 
     std::array<bool, MEBVHAggregate::WIDTH> Intersect(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, const Vector3f &invDir, const int dirIsNeg[3]) const {
         #ifdef METRIC_RAYBOX
-        auto start = std::chrono::high_resolution_clock::now();
+            auto start = std::chrono::high_resolution_clock::now();
         #endif
         
         std::array<bool, MEBVHAggregate::WIDTH> hit;
@@ -1763,7 +1790,8 @@ struct alignas(64) LinearMEBVHNode_4{
             hit[i] = bounds(i).IntersectP(ray_o, ray_d, raytMax, invDir, dirIsNeg);
         }
         #ifdef METRIC_RAYBOX
-            Options->raybox_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+            auto end = std::chrono::high_resolution_clock::now();
+            bvhRayBoxTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
         #endif
         
         return hit;
@@ -1784,7 +1812,7 @@ struct alignas(64) LinearMEBVHNode_4{
 
     std::array<bool, MEBVHAggregate::WIDTH> IntersectSIMD(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, const Vector3f &invDir, const int dirIsNeg[3]) const {
         #ifdef METRIC_RAYBOX
-        auto start = std::chrono::high_resolution_clock::now();
+            auto start = std::chrono::high_resolution_clock::now();
         #endif
         __m256 ray_o_xyz = _mm256_set1_ps(ray_o.x);
         __m256 invDir_xyz = _mm256_set1_ps(invDir.x);                                                                     
@@ -1821,7 +1849,8 @@ struct alignas(64) LinearMEBVHNode_4{
         hit[i] = std::isnan(t_cmp[i]);   
     
         #ifdef METRIC_RAYBOX
-            Options->raybox_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+            auto end = std::chrono::high_resolution_clock::now();
+            bvhRayBoxTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
         #endif
         
         return hit;
@@ -2007,7 +2036,7 @@ struct alignas(64) LinearOptimizedMEBVHNode{
 
     std::array<bool, MEBVHAggregate::WIDTH> IntersectSIMD(const Point3f &ray_o, const Vector3f &ray_d, const Float &raytMax, const Vector3f &invDir, const int dirIsNeg[3]) const {
         #ifdef METRIC_RAYBOX
-        auto start = std::chrono::high_resolution_clock::now();
+            auto start = std::chrono::high_resolution_clock::now();
         #endif
         
         __m256 p_minus_o = _mm256_set1_ps(p(0) - ray_o.x);
@@ -2036,7 +2065,8 @@ struct alignas(64) LinearOptimizedMEBVHNode{
         for(int i=0; i<MEBVHAggregate::WIDTH; ++i)
         hit[i] = std::isnan(t_cmp[i]);   
         #ifdef METRIC_RAYBOX
-            Options->raybox_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+            auto end = std::chrono::high_resolution_clock::now();
+            bvhRayBoxTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
         #endif
         
         return hit;
@@ -2052,6 +2082,7 @@ MEBVHAggregate::MEBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode)
       primitives(std::move(prims)) {
 
     CHECK(!primitives.empty());
+    auto start = std::chrono::high_resolution_clock::now();
     std::vector<BVHPrimitive> bvhPrimitives(primitives.size());
     for (size_t i = 0; i < primitives.size(); ++i)
         bvhPrimitives[i] = BVHPrimitive(i, primitives[i].Bounds());
@@ -2097,6 +2128,8 @@ MEBVHAggregate::MEBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode)
 
     int offset = flattenMEBVH(root, 0, 1);
     CHECK_EQ(totalNodes.load(), offset);
+    auto end = std::chrono::high_resolution_clock::now();
+    bvhBuildTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
 }
 
 MEBVHBuildNode* MEBVHAggregate::buildRecursive(
@@ -2573,7 +2606,8 @@ pstd::optional<ShapeIntersection> MEBVHAggregate::Intersect(const Ray &ray, Floa
     bvhNodesVisited += nodesVisited;
     
     #ifdef METRIC_TRAVERSAL
-        Options->traversal_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+        auto end = std::chrono::high_resolution_clock::now();
+        bvhTraversalTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
     #endif
     return si;
 };
@@ -2634,7 +2668,8 @@ bool MEBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
     }
     bvhNodesVisited += nodesVisited;
     #ifdef METRIC_TRAVERSAL
-        Options->traversal_time[pthread_self()] += std::chrono::high_resolution_clock::now() - start;
+        auto end = std::chrono::high_resolution_clock::now();
+        bvhTraversalTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
     #endif
     return false;
 

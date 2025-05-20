@@ -44,10 +44,8 @@ void RenderCPU(BasicScene &parsedScene) {
     parsedScene.CreateMaterials(textures, &namedMaterials, &materials);
     LOG_VERBOSE("Finished materials");
 
-    auto aggregate_start = std::chrono::high_resolution_clock::now();
     Primitive accel = parsedScene.CreateAggregate(textures, shapeIndexToAreaLights, media,
                                                   namedMaterials, materials);
-    auto aggregate_end = std::chrono::high_resolution_clock::now();
     
     Camera camera = parsedScene.GetCamera();
     Film film = camera.GetFilm();
@@ -158,31 +156,11 @@ void RenderCPU(BasicScene &parsedScene) {
     }
     
     // Render!
-    printf("METRICS Aggregate time : %f\n", std::chrono::duration<double>(aggregate_end - aggregate_start).count());
-    
-    auto render_start = std::chrono::high_resolution_clock::now();
+    auto start = std::chrono::high_resolution_clock::now();
     integrator->Render();
-    auto render_end = std::chrono::high_resolution_clock::now();
-    
-
-    printf("METRICS Render time    : %f\n", std::chrono::duration<double>(render_end - render_start).count());
-
-    double raybox_time = 0;
-    for(auto &[tid, time]: Options->raybox_time)
-        raybox_time += time.count();
-    printf("METRICS Raybox time    : %f\n", raybox_time);
-
-    double traversal_time = 0;
-    for(auto &[tid, time]: Options->traversal_time)
-        traversal_time += time.count();
-    printf("METRICS Traversal time : %f\n", traversal_time);
-
-    double dequant_time = 0;
-    for(auto &[tid, time]: Options->dequant_time)
-        dequant_time += time.count();
-    printf("METRICS Dequant time   : %f\n", dequant_time);
-
-
+    auto end = std::chrono::high_resolution_clock::now();
+    int64_t render = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+    printf("Render time: %ld ns\n", render);
     
     PtexTextureBase::ReportStats();
     ImageTextureBase::ClearCache();
