@@ -94,8 +94,8 @@ BasicSceneBuilder::BasicSceneBuilder(BasicScene *scene)
     filter.name = SceneEntity::internedStrings.Lookup("gaussian");
     integrator.name = SceneEntity::internedStrings.Lookup("volpath");
     accelerator.name = SceneEntity::internedStrings.Lookup("bvh");
-    if(Options->VQBVH)
-        accelerator.name = SceneEntity::internedStrings.Lookup("vqbvh");
+    if(Options->VWBVH)
+        accelerator.name = SceneEntity::internedStrings.Lookup("vwbvh");
 
     film.name = SceneEntity::internedStrings.Lookup("rgb");
     film.parameters = ParameterDictionary({}, RGBColorSpace::sRGB);
@@ -1603,7 +1603,7 @@ Primitive BasicScene::CreateAggregate(
         APs += (nullptr != prim.CastOrNullptr<AnimatedPrimitive>());
         BAs += (nullptr != prim.CastOrNullptr<BVHAggregate>());
         KAs += (nullptr != prim.CastOrNullptr<KdTreeAggregate>());
-        VAs += (nullptr != prim.CastOrNullptr<VQBVHAggregate>());
+        VAs += (nullptr != prim.CastOrNullptr<VWBVHAggregate>());
     }
     LOG_CONCISE("SimplePrimitive      : %lu", SPs);
     LOG_CONCISE("GeometricPrimitive   : %lu", GPs);
@@ -1611,7 +1611,7 @@ Primitive BasicScene::CreateAggregate(
     LOG_CONCISE("AnimatedPrimitive    : %lu", APs);
     LOG_CONCISE("BVHAggregate         : %lu", BAs);
     LOG_CONCISE("KdTreeAggregate      : %lu", KAs);
-    LOG_CONCISE("VQBVHAggregate       : %lu", VAs);
+    LOG_CONCISE("VWBVHAggregate       : %lu", VAs);
 
 
 
