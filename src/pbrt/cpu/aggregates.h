@@ -144,7 +144,7 @@ class MEBVHAggregate {
     // using LinearNode = LinearMEBVHNode_4;
 
     #define METRIC_TRAVERSAL
-    #define METRIC_RAYBOX
+    // #define METRIC_RAYBOX
     // #define METRIC_DEQUANT
     LinearNode *nodes = nullptr;
 };

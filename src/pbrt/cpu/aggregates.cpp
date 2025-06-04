@@ -552,6 +552,11 @@ pstd::optional<ShapeIntersection> BVHAggregate::Intersect(const Ray &ray,
     if (!nodes)
         return {};
 
+    
+    #ifdef METRIC_TRAVERSAL
+        auto start = std::chrono::high_resolution_clock::now();
+    #endif
+    
     pstd::optional<ShapeIntersection> si = {};
     Vector3f invDir(1 / ray.d.x, 1 / ray.d.y, 1 / ray.d.z);
     int dirIsNeg[3] = {int(invDir.x < 0), int(invDir.y < 0), int(invDir.z < 0)};
@@ -571,14 +576,14 @@ pstd::optional<ShapeIntersection> BVHAggregate::Intersect(const Ray &ray,
                 for (int i = 0; i < node->nPrimitives; ++i) {
                     // Check for intersection with primitive in BVH node
                     pstd::optional<ShapeIntersection> primSi =
-                        primitives[node->primitivesOffset + i].Intersect(ray, tMax);
+                    primitives[node->primitivesOffset + i].Intersect(ray, tMax);
                     if (primSi) {
                         si = primSi;
                         tMax = si->tHit;
                     }
                 }
                 if (toVisitOffset == 0)
-                    break;
+                break;
                 currentNodeIndex = nodesToVisit[--toVisitOffset];
             } else {
                 // Put far BVH node on _nodesToVisit_ stack, advance to near node
@@ -592,18 +597,28 @@ pstd::optional<ShapeIntersection> BVHAggregate::Intersect(const Ray &ray,
             }
         } else {
             if (toVisitOffset == 0)
-                break;
+            break;
             currentNodeIndex = nodesToVisit[--toVisitOffset];
         }
     }
     bvhNodesVisited += nodesVisited;
+    #ifdef METRIC_TRAVERSAL
+        auto end = std::chrono::high_resolution_clock::now();
+        bvhTraversalTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+    #endif
     return si;
 }
 
 bool BVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
     if (!nodes)
         return false;
-    Vector3f invDir(1.f / ray.d.x, 1.f / ray.d.y, 1.f / ray.d.z);
+    
+    #ifdef METRIC_TRAVERSAL
+        auto start = std::chrono::high_resolution_clock::now();
+    #endif
+
+    
+        Vector3f invDir(1.f / ray.d.x, 1.f / ray.d.y, 1.f / ray.d.z);
     int dirIsNeg[3] = {static_cast<int>(invDir.x < 0), static_cast<int>(invDir.y < 0),
                        static_cast<int>(invDir.z < 0)};
     int nodesToVisit[64];
@@ -619,6 +634,10 @@ bool BVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
                 for (int i = 0; i < node->nPrimitives; ++i) {
                     if (primitives[node->primitivesOffset + i].IntersectP(ray, tMax)) {
                         bvhNodesVisited += nodesVisited;
+                        #ifdef METRIC_TRAVERSAL
+                            auto end = std::chrono::high_resolution_clock::now();
+                            bvhTraversalTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+                        #endif
                         return true;
                     }
                 }
@@ -642,6 +661,10 @@ bool BVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
         }
     }
     bvhNodesVisited += nodesVisited;
+    #ifdef METRIC_TRAVERSAL
+        auto end = std::chrono::high_resolution_clock::now();
+        bvhTraversalTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+    #endif
     return false;
 }
 
@@ -1371,7 +1394,10 @@ bool WBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
                     for(int i=0; i< node->nPrimitives[child]; ++i){
                         if(primitives[node->offsets[child] + i].IntersectP(ray, tMax)){
                             bvhNodesVisited += nodesVisited;
-                            // Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
+                            #ifdef METRIC_TRAVERSAL
+                                auto end = std::chrono::high_resolution_clock::now();
+                                bvhTraversalTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+                            #endif
                             return true;
                         }
                     }
@@ -2648,14 +2674,17 @@ bool MEBVHAggregate::IntersectP(const Ray &ray, Float tMax) const {
         for(int child = 0; child < MEBVHAggregate::WIDTH; ++child){
             if(child >= MEBVHAggregate::WIDTH)
                 continue;
-                else if(node->isEmpty(child))
+            else if(node->isEmpty(child))
                 continue;
-                else if(hit[child]){
-                    if(node->isLeaf(child)){
+            else if(hit[child]){
+                if(node->isLeaf(child)){
                     for(int i=0; i< node->nPrimitives(child); ++i){
                         if(primitives[primitive_offsets[child] + i].IntersectP(ray, tMax)){
                             bvhNodesVisited += nodesVisited;
-                            // Options->intersect_time += std::chrono::high_resolution_clock::now() - start;
+                            #ifdef METRIC_TRAVERSAL
+                                auto end = std::chrono::high_resolution_clock::now();
+                                bvhTraversalTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+                            #endif
                             return true;
                         }
                     }
