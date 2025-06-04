@@ -26,8 +26,14 @@ STAT_COUNTER("BVH/Interior nodes", interiorNodes);
 STAT_COUNTER("BVH/Leaf nodes", leafNodes);
 STAT_PIXEL_COUNTER("BVH/Nodes visited", bvhNodesVisited);
 
+STAT_COUNTER("BVH/Build Time (ns)", bvhBuildTime);
+
+
+
 STAT_PERCENT("VWBVH/Mask false positive rate", maskFalses, maskTests);
 STAT_PERCENT("VWBVH/Voxel occupancy rate", voxelSets, voxels);
+
+
 // MortonPrimitive Definition
 struct MortonPrimitive {
     int primitiveIndex;
@@ -159,6 +165,8 @@ BVHAggregate::BVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode,
     CHECK(!primitives.empty());
     // Build BVH from _primitives_
     // Initialize _bvhPrimitives_ array for primitives
+    auto start = std::chrono::high_resolution_clock::now();
+
     std::vector<BVHPrimitive> bvhPrimitives(primitives.size());
     for (size_t i = 0; i < primitives.size(); ++i)
         bvhPrimitives[i] = BVHPrimitive(i, primitives[i].Bounds());
@@ -201,6 +209,9 @@ BVHAggregate::BVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode,
     int offset = 0;
     flattenBVH(root, &offset);
     CHECK_EQ(totalNodes.load(), offset);
+
+    auto end = std::chrono::high_resolution_clock::now();
+    bvhBuildTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
 }
 
 BVHBuildNode *BVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAllocators,
@@ -760,17 +771,19 @@ BVHAggregate *BVHAggregate::Create(std::vector<Primitive> prims,
 
 // VWBVHAggrefate Method Definitions
 VWBVHAggregate::VWBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode,
-                           SplitMethod splitMethod)
+    SplitMethod splitMethod)
     : maxPrimsInNode(std::min(255, maxPrimsInNode)),
-      primitives(std::move(prims)),
-      splitMethod(splitMethod) {
-    CHECK(!primitives.empty());
+    primitives(std::move(prims)),
+    splitMethod(splitMethod) {
+        CHECK(!primitives.empty());
+        auto start = std::chrono::high_resolution_clock::now();
+        
     // Build BVH from _primitives_
     // Initialize _bvhPrimitives_ array for primitives
     std::vector<BVHPrimitive> bvhPrimitives(primitives.size());
     for (size_t i = 0; i < primitives.size(); ++i)
     bvhPrimitives[i] = BVHPrimitive(i, primitives[i].Bounds());
-
+    
     // Build BVH for primitives using _bvhPrimitives_
     // Declare _Allocator_s used for BVH construction
     pstd::pmr::monotonic_buffer_resource resource;
@@ -782,51 +795,53 @@ VWBVHAggregate::VWBVHAggregate(std::vector<Primitive> prims, int maxPrimsInNode,
         auto ptr = threadBufferResources.back().get();
         return Allocator(ptr);
     });
-
+    
     std::vector<Primitive> orderedPrims(primitives.size());
     BVHBuildNode *root;
     // Build BVH according to selected _splitMethod_
     std::atomic<int> totalNodes{0};
-
+    
     std::atomic<int> orderedPrimsOffset{0};
     root = buildRecursive(threadAllocators, pstd::span<BVHPrimitive>(bvhPrimitives),
-                            &totalNodes, &orderedPrimsOffset, orderedPrims);
+    &totalNodes, &orderedPrimsOffset, orderedPrims);
     CHECK_EQ(orderedPrimsOffset.load(), orderedPrims.size());
     
     primitives.swap(orderedPrims);
-
+    
     // Convert BVH into compact representation in _nodes_ array
     bvhPrimitives.resize(0);
     bvhPrimitives.shrink_to_fit();
     LOG_CONCISE("BVH created with %d nodes for %d primitives (%.2f MB)",
-                totalNodes.load(), (int)primitives.size(),
-                float(totalNodes.load() * sizeof(LinearBVHNode)) / (1024.f * 1024.f));
+    totalNodes.load(), (int)primitives.size(),
+    float(totalNodes.load() * sizeof(LinearBVHNode)) / (1024.f * 1024.f));
     treeBytes += totalNodes * sizeof(LinearBVHNode) + sizeof(*this) +
-                 primitives.size() * sizeof(primitives[0]);
+    primitives.size() * sizeof(primitives[0]);
     nodes = new LinearVWBVHNode[totalNodes];
     int offset = 0;
-
+    
     flattenVWBVH(root, &offset);
     
     CHECK_EQ(totalNodes.load(), offset);
+    auto end = std::chrono::high_resolution_clock::now();
+    bvhBuildTime += std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
 }
-
-BVHBuildNode *VWBVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAllocators,
-                                           pstd::span<BVHPrimitive> bvhPrimitives,
-                                           std::atomic<int> *totalNodes,
-                                           std::atomic<int> *orderedPrimsOffset,
-                                           std::vector<Primitive> &orderedPrims) {
-    DCHECK_NE(bvhPrimitives.size(), 0);
-    Allocator alloc = threadAllocators.Get();
-    BVHBuildNode *node = alloc.new_object<BVHBuildNode>();
-    // Initialize _BVHBuildNode_ for primitive range
-    ++*totalNodes;
-    // Compute bounds of all primitives in BVH node
-    Bounds3f bounds;
-    for (const auto &prim : bvhPrimitives)
-        bounds = Union(bounds, prim.bounds);
-
-    if (bounds.SurfaceArea() == 0 || bvhPrimitives.size() == 1) {
+    
+    BVHBuildNode *VWBVHAggregate::buildRecursive(ThreadLocal<Allocator> &threadAllocators,
+        pstd::span<BVHPrimitive> bvhPrimitives,
+        std::atomic<int> *totalNodes,
+        std::atomic<int> *orderedPrimsOffset,
+        std::vector<Primitive> &orderedPrims) {
+            DCHECK_NE(bvhPrimitives.size(), 0);
+            Allocator alloc = threadAllocators.Get();
+            BVHBuildNode *node = alloc.new_object<BVHBuildNode>();
+            // Initialize _BVHBuildNode_ for primitive range
+            ++*totalNodes;
+            // Compute bounds of all primitives in BVH node
+            Bounds3f bounds;
+            for (const auto &prim : bvhPrimitives)
+            bounds = Union(bounds, prim.bounds);
+            
+            if (bounds.SurfaceArea() == 0 || bvhPrimitives.size() == 1) {
         // Create leaf _BVHBuildNode_
         int firstPrimOffset = orderedPrimsOffset->fetch_add(bvhPrimitives.size());
         for (size_t i = 0; i < bvhPrimitives.size(); ++i) {
