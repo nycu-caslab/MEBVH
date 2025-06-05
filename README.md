@@ -8,7 +8,7 @@ Experimental results show that ray tracing benefits significantly from this comp
 
 ## Environment Setup
 ```bash
-git clone git@github.com:nycu-caslab/MEBVH.git
+git clone --recursive git@github.com:nycu-caslab/MEBVH.git
 cd MEBVH
 git checkout MEBVH
 mkdir build
