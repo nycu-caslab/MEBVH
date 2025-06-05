@@ -3,6 +3,7 @@
 ## Environment Setup
 ```bash
 git clone git@github.com:nycu-caslab/MEBVH.git
+cd MEBVH
 git checkout MEBVH
 mkdir build
 cd build
